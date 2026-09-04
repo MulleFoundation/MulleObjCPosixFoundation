@@ -11,12 +11,30 @@ endif()
 # contents selected with patternfile ??-source--sources
 #
 set( SOURCES
-src/MulleObjCOSFoundation.m
+src/Functions/NSLog.m
+src/Functions/mulle-posix-tm.c
+src/NSBundle+Posix.m
+src/NSCalendarDate+Posix.m
+src/NSData+Posix.m
+src/NSDate+Posix.m
+src/NSDirectoryEnumerator+Posix.m
+src/NSError+Posix.m
+src/NSFileHandle+Posix.m
+src/NSFileManager+Posix.m
+src/NSLocale+Posix.m
+src/NSPageAllocation+Posix.m
+src/NSPipe+Posix.m
+src/_NSPosixDateFormatter.m
+src/NSProcessInfo+Posix.m
+src/NSRunLoop+Posix.m
+src/NSTask+Posix.m
+src/NSTimeZone+Posix.m
+src/Timezone/localtime.c
 )
 
 #
 # contents selected with patternfile ??-source--stage2-sources
 #
 set( STAGE2_SOURCES
-src/MulleObjCDeps+MulleObjCOSFoundation.m
+src/MulleObjCDeps+MulleObjCPosixFoundation.m
 )

@@ -12,49 +12,65 @@ endif()
 
 set( INCLUDE_DIRS
 src/reflect
-src/generic
 src
+src/Timezone
+src/Functions
 )
 
 #
 # contents selected with patternfile ??-header--private-generated-headers
 #
 set( PRIVATE_GENERATED_HEADERS
-src/reflect/_MulleObjCOSFoundation-import-private.h
-src/reflect/_MulleObjCOSFoundation-include-private.h
+src/reflect/_MulleObjCPosixFoundation-import-private.h
+src/reflect/_MulleObjCPosixFoundation-include-private.h
 )
 
 #
 # contents selected with patternfile ??-header--private-generic-headers
 #
 set( PRIVATE_GENERIC_HEADERS
-src/generic/import-private.h
-src/generic/include-private.h
+src/import-private.h
+src/include-private.h
+)
+
+#
+# contents selected with patternfile ??-header--private-headers
+#
+set( PRIVATE_HEADERS
+src/NSDate+Posix-Private.h
+src/NSLocale+Posix-Private.h
+src/NSTimeZone+Posix-Private.h
+src/Timezone/private.h
 )
 
 #
 # contents selected with patternfile ??-header--public-generated-headers
 #
 set( PUBLIC_GENERATED_HEADERS
-src/reflect/_MulleObjCOSFoundation-export.h
-src/reflect/_MulleObjCOSFoundation-import.h
-src/reflect/_MulleObjCOSFoundation-include.h
-src/reflect/_MulleObjCOSFoundation-provide.h
+src/reflect/_MulleObjCPosixFoundation-export.h
+src/reflect/_MulleObjCPosixFoundation-import.h
+src/reflect/_MulleObjCPosixFoundation-include.h
+src/reflect/_MulleObjCPosixFoundation-provide.h
 )
 
 #
 # contents selected with patternfile ??-header--public-generic-headers
 #
 set( PUBLIC_GENERIC_HEADERS
-src/generic/import.h
-src/generic/include.h
+src/import.h
+src/include.h
 )
 
 #
 # contents selected with patternfile ??-header--public-headers
 #
 set( PUBLIC_HEADERS
-src/MulleObjCDeps+MulleObjCOSFoundation.h
-src/MulleObjCOSFoundation.h
+src/Functions/NSLog.h
+src/Functions/mulle-posix-tm.h
+src/MulleObjCPosixFoundation.h
+src/NSError+Posix.h
+src/NSLocale+Posix.h
+src/_NSPosixDateFormatter.h
+src/Timezone/tzfile.h
 )
 

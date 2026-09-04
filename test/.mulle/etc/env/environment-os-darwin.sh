@@ -1,6 +1,0 @@
-#
-#
-#
-export MULLE_CRAFT_PLATFORMS="${MULLE_UNAME}"
-
-

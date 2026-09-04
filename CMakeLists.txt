@@ -1,18 +1,14 @@
 cmake_minimum_required( VERSION 3.13...99.99)
 
-project( MulleObjCOSFoundation VERSION 0.26.1 LANGUAGES C)
+project( MulleObjCPosixFoundation C)
 
-
-# we don't produce any Loader, the subprojects do that
-
-set( CREATE_OBJC_LOADER_INC OFF)
 
 ### mulle-sde environment
 
 # add cmake module paths to search path
-list( INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_SOURCE_DIR}/cmake/share")
-list( INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_SOURCE_DIR}/cmake/reflect")
-list( INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+list( INSERT CMAKE_MODULE_PATH 0 "${PROJECT_SOURCE_DIR}/cmake/share")
+list( INSERT CMAKE_MODULE_PATH 0 "${PROJECT_SOURCE_DIR}/cmake/reflect")
+list( INSERT CMAKE_MODULE_PATH 0 "${PROJECT_SOURCE_DIR}/cmake")
 
 include( Environment)
 
@@ -21,9 +17,9 @@ include( Files)
 ### Library
 
 if( HEADERS_PHASE)
-   install( FILES ${INSTALL_PUBLIC_HEADERS}  DESTINATION "include/${PROJECT_NAME}")
-   install( FILES ${INSTALL_PRIVATE_HEADERS} DESTINATION "include/${PROJECT_NAME}")
-   install( FILES ${INSTALL_CMAKE_INCLUDES}          DESTINATION "include/${PROJECT_NAME}/cmake")
+   install( FILES ${INSTALL_PUBLIC_HEADERS}  DESTINATION "include/MulleObjCPosixFoundation")
+   install( FILES ${INSTALL_PRIVATE_HEADERS} DESTINATION "include/MulleObjCPosixFoundation")
+   install( FILES ${INSTALL_CMAKE_INCLUDES}          DESTINATION "include/MulleObjCPosixFoundation/cmake")
 
    # short cut out
    if( NOT COMPILE_PHASE AND NOT LINK_PHASE)
@@ -36,20 +32,5 @@ if( LINK_PHASE)
 endif()
 
 include( Library)
-
-# use LIBRARY_COMPILE_TARGET for compiler options
-target_compile_definitions( "${LIBRARY_COMPILE_TARGET}" PUBLIC)
-target_compile_options( "${LIBRARY_COMPILE_TARGET}" PUBLIC -Wall)
-# use LIBRARY_LINK_TARGET for linker options
-if( LINK_PHASE)
-   target_link_options( "${LIBRARY_LINK_TARGET}" PUBLIC)
-endif()
-
 include( InstallLibrary)
-
-if( LINK_PHASE)
-   include( InstallCMakeInclude)
-   include( InstallCMakePackage)
-endif() 
-
 include( FinalOutput OPTIONAL)
