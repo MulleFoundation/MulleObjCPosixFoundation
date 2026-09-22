@@ -29,6 +29,7 @@ src/NSProcessInfo+Posix.m
 src/NSRunLoop+Posix.m
 src/NSTask+Posix.m
 src/NSTimeZone+Posix.m
+src/NSUserDefaults+Posix.m
 src/Timezone/localtime.c
 )
 

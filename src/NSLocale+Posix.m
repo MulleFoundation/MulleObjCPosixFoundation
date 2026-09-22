@@ -138,15 +138,27 @@ id    mulle_locale_lconv_value( struct lconv *conv, int code)
 
 @implementation NSLocale( Posix)
 
-static NSArray   *identifiers;
+static NSArray                *identifiers;
+static mulle_thread_mutex_t   identifiersLock;
+
+
++ (void) load
+{
+   if( mulle_thread_mutex_init( &identifiersLock))
+      abort();
+}
+
 
 + (void) unload
 {
+   mulle_thread_mutex_lock( &identifiersLock);
    if( identifiers) // avoid +initialize due to -release (noticed in trace)
    {
       [identifiers release];
       identifiers = nil;
    }
+   mulle_thread_mutex_unlock( &identifiersLock);
+   mulle_thread_mutex_done( &identifiersLock);
 }
 
 // So on linux the locale available from <locale.h> is basically the contents
@@ -165,13 +177,19 @@ static NSArray   *identifiers;
 //
 + (NSArray *) availableLocaleIdentifiers
 {
+   NSArray    *result;
    NSString   *command;
    NSString   *tmpFile;
    NSString   *name;
    NSString   *s;
 
+   mulle_thread_mutex_lock( &identifiersLock);
    if( identifiers)
-      return( identifiers);
+   {
+      result = [[identifiers retain] autorelease];
+      mulle_thread_mutex_unlock( &identifiersLock);
+      return( result);
+   }
 
    tmpFile     = NSTemporaryDirectory();
    name        = [[NSProcessInfo processInfo] globallyUniqueString];
@@ -189,7 +207,10 @@ static NSArray   *identifiers;
       identifiers  = @[ @"C", @"POSIX", @"en_US.utf8" ];
 
    identifiers = [identifiers copy];
-   return( identifiers);
+   result      = identifiers;
+   mulle_thread_mutex_unlock( &identifiersLock);
+
+   return( result);
 }
 
 
@@ -273,6 +294,11 @@ de_DE.plist
    _xlocale    = xlocale;
    _identifier = [name copy];
    _keyValues  = [NSMutableDictionary new];
+   _lock       = [NSLock new];
+
+   // _keyValues is only accessed under _lock, so tell TAO that it may be
+   // messaged from any thread (it has no real thread affinity).
+   [_keyValues mulleSetThreadSafe:YES];
 
    auxInfo = [[self class] auxiliaryLocaleInfoForIdentifier:name];
    [_keyValues addEntriesFromDictionary:auxInfo];
@@ -285,6 +311,7 @@ de_DE.plist
 {
    [_identifier release];
    [_keyValues release];
+   [_lock release];
    if( _xlocale)
       freelocale( _xlocale);
 
@@ -292,26 +319,31 @@ de_DE.plist
 }
 
 
-- (id) objectForKey:(id) key
+- (id) objectForKey:(id) key   MULLE_OBJC_THREADSAFE_METHOD
 {
-   id               value;
+   id   value;
 
-   value = [_keyValues objectForKey:key];
-   if( value)
+   [_lock lock];
    {
-      if( value == [NSNull null])
-         value = nil;
-      return( value);
+      value = [_keyValues objectForKey:key];
+      if( value)
+      {
+         if( value == [NSNull null])
+            value = nil;
+      }
+      else
+      {
+         value = [self _localeInfoForKey:key];
+         [_keyValues setObject:value ? value : [NSNull null]
+                        forKey:key];
+      }
    }
-
-   value = [self _localeInfoForKey:key];
-   [_keyValues setObject:value ? value : [NSNull null]
-                  forKey:key];
+   [_lock unlock];
    return( value);
 }
 
 
-- (locale_t) xlocale
+- (locale_t) xlocale   MULLE_OBJC_THREADSAFE_METHOD
 {
    return( _xlocale);
 }

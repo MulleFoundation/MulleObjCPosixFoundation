@@ -65,6 +65,7 @@ THE SOFTWARE.
 #include <fcntl.h>
 #include <float.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -176,14 +177,26 @@ THE SOFTWARE.
    date = [attributes objectForKey:NSFileModificationDate];
    if( date)
    {
-      struct timeval   timeval;
-      NSTimeInterval   ticks;
+      struct timespec   times[ 2];
+      NSTimeInterval    ticks;
+      long long         sec;
+      long              nsec;
 
       ticks = [date timeIntervalSince1970];
-      timeval.tv_sec  = (int) ticks;
-      timeval.tv_usec = (int) ((ticks - timeval.tv_sec) * 1000000 + 0.5);
+      sec   = (long long) ticks;
+      nsec  = (long) ((ticks - (NSTimeInterval) sec) * 1000000000 + 0.5);
+      if( nsec >= 1000000000)
+      {
+         sec++;
+         nsec -= 1000000000;
+      }
 
-      if( utimes( s, &timeval))
+      times[ 0].tv_sec  = 0;              // don't touch the access time
+      times[ 0].tv_nsec = UTIME_OMIT;
+      times[ 1].tv_sec  = (time_t) sec;   // modification time
+      times[ 1].tv_nsec = nsec;
+
+      if( utimensat( AT_FDCWD, s, times, 0))
       {
          return( NO);
       }
@@ -199,12 +212,29 @@ THE SOFTWARE.
               withDestinationPath:(NSString *) otherpath
                             error:(NSError **) error
 {
-   MULLE_C_UNUSED( path );
-   MULLE_C_UNUSED( otherpath );
-   MULLE_C_UNUSED( error );
+   char   *s_path;
+   char   *s_otherpath;
+
    MulleObjCSetPosixErrorDomain();
 
-   abort();  // not yet coded
+   s_path      = [path fileSystemRepresentation];
+   s_otherpath = [otherpath fileSystemRepresentation];
+   if( ! s_path || ! s_otherpath)
+   {
+      if( error)
+         *error = [NSError mulleExtract];
+      return( NO);
+   }
+
+   // destination is not traversed, so links to nonexistent paths are fine
+   if( symlink( s_otherpath, s_path))
+   {
+      if( error)
+         *error = [NSError mulleExtract];
+      return( NO);
+   }
+
+   return( YES);
 }
 
 
@@ -225,6 +255,10 @@ THE SOFTWARE.
    if( ! mkdir( s, mode))
       return( 0);
 
+   // FreeBSD reports EISDIR for mkdir("/"), Linux reports EEXIST
+   if( errno == EISDIR)
+      return( EEXIST);
+
    // can't switch because of cosmopolitan
    if( errno == EEXIST || errno == ENOENT)
       return( errno);
@@ -239,10 +273,12 @@ THE SOFTWARE.
                          error:(NSError **) error
 {
    NSArray          *components;
+   NSDictionary     *chmodAttributes;
    NSMutableArray   *subComponents;
    NSString         *subpath;
    NSUInteger       i, n;
    int              rc;
+   BOOL             isDirectory;
 
 
    MulleObjCSetPosixErrorDomain();
@@ -262,11 +298,30 @@ THE SOFTWARE.
                             error:error]);
    }
 
+   if( rc == EEXIST)
+   {
+      // an existing item is only an error, if we didn't want intermediates
+      if( ! createIntermediates)
+         return( NO);
+
+      // Apple compatible: an existing directory is a success
+      if( ! [self fileExistsAtPath:path
+                       isDirectory:&isDirectory])
+         return( NO);
+
+      return( isDirectory);
+   }
+
    if( rc != ENOENT)
       return( NO);
 
    if( ! createIntermediates)
       return( NO);
+
+   /* mkdir has applied NSFilePosixPermissions already, don't repeat it */
+   chmodAttributes = attributes;
+   if( attributes)
+      chmodAttributes = [attributes mulleDictionaryByRemovingObjectForKey:NSFilePosixPermissions];
 
    // does not exist, create it
 
@@ -282,13 +337,13 @@ THE SOFTWARE.
       rc = [self _createDirectoryAtPath:subpath
                              attributes:attributes];
       if( rc == EEXIST)
-         break;
+         continue;
 
       if( rc)
          return( NO);
 
-      if( ! [self setAttributes:attributes
-                   ofItemAtPath:path
+      if( ! [self setAttributes:chmodAttributes
+                   ofItemAtPath:subpath
                           error:error])
       {
          return( NO);
@@ -364,33 +419,61 @@ static unsigned int    permissons_for_current_uid_gid( struct stat *c_info)
 }
 
 //
-// need to check directory permissions too...
+// On POSIX an item is deletable if its containing directory is writable and
+// searchable. In a sticky directory only the owner may delete. A symbolic
+// link at path is not traversed.
 //
 - (BOOL) isDeletableFileAtPath:(NSString *) path
 {
    struct stat   c_info;
+   struct stat   parent_info;
+   NSString      *parent;
+   char          *s;
+   uid_t         uid;
 
    MulleObjCSetPosixErrorDomain();
 
-   if( stat_at_path( path, &c_info))
+   s = [path fileSystemRepresentation];
+   if( ! s || lstat( s, &c_info))
       return( NO);
-   return( permissons_for_current_uid_gid( &c_info) & 0444 ? YES : NO);
+
+   uid = getuid();
+   if( ! uid)
+      return( YES);
+
+   parent = [path stringByDeletingLastPathComponent];
+   if( ! [parent length])
+      parent = @".";
+
+   s = [parent fileSystemRepresentation];
+   if( ! s || stat( s, &parent_info))
+      return( NO);
+
+   if( access( s, W_OK | X_OK))
+      return( NO);
+
+   // in a sticky directory only the owner may delete
+   if( (parent_info.st_mode & S_ISVTX) &&
+       uid != c_info.st_uid       &&
+       uid != parent_info.st_uid)
+      return( NO);
+
+   return( YES);
 }
 
 
 - (BOOL) isExecutableFileAtPath:(NSString *) path
 {
-   struct stat   c_info;
+   char   *s;
 
    MulleObjCSetPosixErrorDomain();
 
-   if( stat_at_path( path, &c_info))
+   s = [path fileSystemRepresentation];
+   if( ! s)
       return( NO);
 
-   /* directories are not considered executable or ? */
-   if( c_info.st_mode & S_IFDIR)
-      return( NO);
-   return( permissons_for_current_uid_gid( &c_info) & 0111 ? YES : NO);
+   // directories are executable, if they can be searched
+   return( access( s, X_OK) ? NO : YES);
 }
 
 
@@ -533,7 +616,8 @@ static BOOL  is_symlink( char *c_path)
 }
 
 
-- (NSDictionary *) fileSystemAttributesAtPath:(NSString *) path
+- (NSDictionary *) _itemAttributesAtPath:(NSString *) path
+                            traverseLink:(BOOL) traverseLink
 {
    NSMutableDictionary  *dictionary;
    char                 *c_path;
@@ -544,9 +628,18 @@ static BOOL  is_symlink( char *c_path)
    MulleObjCSetPosixErrorDomain();
 
    c_path = [path fileSystemRepresentation];
-   if( lstat( c_path, &c_info))
-   {
+   if( ! c_path)
       return( nil);
+
+   if( traverseLink)
+   {
+      if( stat( c_path, &c_info))
+         return( nil);
+   }
+   else
+   {
+      if( lstat( c_path, &c_info))
+         return( nil);
    }
 
    dictionary = [NSMutableDictionary dictionary];
@@ -558,7 +651,7 @@ static BOOL  is_symlink( char *c_path)
    set_integer_key_value( dictionary, NSFileReferenceCount,      c_info.st_nlink);
    set_long_long_key_value( dictionary, NSFileSize,              c_info.st_size);
    set_integer_key_value( dictionary, NSFileSystemFileNumber,    c_info.st_ino);
-   set_integer_key_value( dictionary, NSFileSystemNumber,        c_info.st_rdev);
+   set_integer_key_value( dictionary, NSFileSystemNumber,        c_info.st_dev);
 
 
    switch( c_info.st_mode & S_IFMT)
@@ -590,26 +683,88 @@ static BOOL  is_symlink( char *c_path)
 }
 
 
+- (NSDictionary *) fileAttributesAtPath:(NSString *) path
+                           traverseLink:(BOOL) flag
+{
+   return( [self _itemAttributesAtPath:path
+                          traverseLink:flag]);
+}
+
+
+- (NSDictionary *) attributesOfItemAtPath:(NSString *) path
+                                    error:(NSError **) error
+{
+   NSDictionary   *attributes;
+
+   // attributesOfItemAtPath: never traverses a symbolic link
+   attributes = [self _itemAttributesAtPath:path
+                               traverseLink:NO];
+   if( ! attributes && error)
+      *error = [NSError mulleExtract];
+   return( attributes);
+}
+
+
+- (NSDictionary *) fileSystemAttributesAtPath:(NSString *) path
+{
+   NSMutableDictionary  *dictionary;
+   char                 *c_path;
+   struct stat          c_info;
+   struct statvfs       vfs;
+
+   MulleObjCSetPosixErrorDomain();
+
+   c_path = [path fileSystemRepresentation];
+   if( ! c_path)
+      return( nil);
+
+   if( statvfs( c_path, &vfs))
+      return( nil);
+
+   if( stat( c_path, &c_info))
+      return( nil);
+
+   dictionary = [NSMutableDictionary dictionary];
+
+   set_long_long_key_value( dictionary, NSFileSystemSize,      (long long) vfs.f_blocks * vfs.f_frsize);
+   set_long_long_key_value( dictionary, NSFileSystemFreeSize,  (long long) vfs.f_bfree  * vfs.f_frsize);
+   set_long_long_key_value( dictionary, NSFileSystemNodes,     (long long) vfs.f_files);
+   set_long_long_key_value( dictionary, NSFileSystemFreeNodes, (long long) vfs.f_ffree);
+   set_integer_key_value( dictionary, NSFileSystemNumber,      c_info.st_dev);
+
+   return( dictionary);
+}
+
+
+- (NSDictionary *) attributesOfFileSystemForPath:(NSString *) path
+                                           error:(NSError **) error
+{
+   NSDictionary   *attributes;
+
+   attributes = [self fileSystemAttributesAtPath:path];
+   if( ! attributes && error)
+      *error = [NSError mulleExtract];
+   return( attributes);
+}
+
+
 static NSString   *link_contents( NSString *path)
 {
-   NSString   *file;
    char       expanded[ PATH_MAX];
-   size_t     len;
+   ssize_t    len;
    char       *c_path;
 
    c_path = [path fileSystemRepresentation];
-   if( is_symlink( c_path))
-      return( nil); // not a symbolic link, so nil for first
+   if( ! c_path || ! is_symlink( c_path))
+      return( nil); // not a symbolic link
 
    len = readlink( c_path, expanded, PATH_MAX);
-   if( len == (size_t) -1)
+   if( len == -1)
       return( nil);
 
-   file = [NSString stringWithCString:expanded
-                               length:len];
-   path = [path stringByDeletingLastPathComponent];
-   path = [path stringByAppendingPathComponent:file];
-   return( path);
+   // a relative destination is returned as is, as Apple does
+   return( [NSString stringWithCString:expanded
+                               length:len]);
 }
 
 //
@@ -690,7 +845,7 @@ static NSString   *link_contents( NSString *path)
 
    buf[ length] = 0;
    return( [self stringWithFileSystemRepresentation:buf
-                                             length:length + 1]);
+                                             length:length]);
 }
 
 
@@ -779,10 +934,11 @@ static NSString   *link_contents( NSString *path)
    MulleObjCSetPosixErrorDomain();
 
 
-    if ([self fileExistsAtPath:srcPath isDirectory:&isDirectory] == NO)
-        return NO;
+    if( ! is_symlink( [srcPath fileSystemRepresentation]) &&
+        ![self fileExistsAtPath:srcPath isDirectory:&isDirectory])
+        return( NO);
     if ([self fileExistsAtPath:dstPath isDirectory:&isDirectory] == YES)
-        return NO;
+        return( NO);
 
     if ([self copyPath:srcPath toPath:dstPath handler:nil] == NO) {
         [self removeFileAtPath:dstPath handler:nil];
@@ -819,13 +975,39 @@ static NSString   *link_contents( NSString *path)
                 toPath:(NSString *)toPath
                  error:(NSError **)error
 {
-    BOOL isDirectory;
+    char     *c_fromPath;
+    BOOL     isDirectory;
+    BOOL     sourceExists;
 
-    if(![self fileExistsAtPath:fromPath isDirectory:&isDirectory]) {
+    c_fromPath   = [fromPath fileSystemRepresentation];
+    sourceExists = is_symlink( c_fromPath);   // lstat, don't follow
+    if( ! sourceExists)
+       sourceExists = [self fileExistsAtPath:fromPath isDirectory:&isDirectory];
+
+    if( ! sourceExists) {
         if (error != NULL) {
             //TODO set error
         }
         return NO;
+    }
+
+    // an existing item at toPath aborts the copy
+    if( [self fileExistsAtPath:toPath])
+        return( NO);
+
+    // a symbolic link is copied as a link, not as its destination
+    if( is_symlink( c_fromPath))
+    {
+       NSString   *destination;
+
+       destination = [self destinationOfSymbolicLinkAtPath:fromPath
+                                                    error:error];
+       if( ! destination)
+          return( NO);
+
+       return( [self createSymbolicLinkAtPath:toPath
+                          withDestinationPath:destination
+                                        error:error]);
     }
 
     if (!isDirectory)

@@ -41,6 +41,7 @@
 
 
 // std-c and dependencies
+#include <sys/utsname.h>
 #include <unistd.h>
 
 
@@ -53,31 +54,52 @@
    return( getpid());
 }
 
+
+- (NSString *) operatingSystemVersionString
+{
+   struct utsname   info;
+
+   if( uname( &info))
+      return( [self operatingSystemName]);
+
+   return( [NSString stringWithFormat:@"%s %s",
+                    info.sysname,
+                    info.release]);
+}
+
 - (void) mulleSetEnvironmentValue:(NSString *) value 
                            forKey:(NSString *) key
 {
    NSMutableDictionary   *dict;
 
-   // environment is lazy
-   dict = _environment 
-          ? [NSMutableDictionary dictionaryWithDictionary:_environment]
-          : nil;
-   if( value)
+   [_lock lock];
    {
-      if( setenv( [key cString], [value cString], 1))
-         MulleObjCThrowErrnoException( @"setenv");
-      [dict setObject:value
-              forKey:key];
-   }
-   else
-   {
-      if( unsetenv( [key cString]))
-         MulleObjCThrowErrnoException( @"unsetenv");
-      [dict removeObjectForKey:key];
-   }
+      // environment is lazy, make sure it is materialized
+      dict = [NSMutableDictionary dictionaryWithDictionary:[self environment]];
+      if( value)
+      {
+         if( setenv( [key cString], [value cString], 1))
+         {
+            [_lock unlock];
+            MulleObjCThrowErrnoException( @"setenv");
+         }
+         [dict setObject:value
+                 forKey:key];
+      }
+      else
+      {
+         if( unsetenv( [key cString]))
+         {
+            [_lock unlock];
+            MulleObjCThrowErrnoException( @"unsetenv");
+         }
+         [dict removeObjectForKey:key];
+      }
    
-   [_environment autorelease];
-   _environment = [dict retain];
+      [_environment autorelease];
+      _environment = [dict copy];
+   }
+   [_lock unlock];
 }                           
 
 @end

@@ -36,6 +36,7 @@
 #define mulle_posix_tm_h__
 
 #include <time.h>
+#include <string.h>   // for memset in the inline functions below
 
 
 // time the old enemy, what it is it ?

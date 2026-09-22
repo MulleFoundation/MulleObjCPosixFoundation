@@ -258,4 +258,15 @@ retry:
    sync();
 }
 
+
+#pragma mark - truncate
+
+- (void) _truncate:(unsigned long long) offset
+{
+   MulleObjCSetPosixErrorDomain();
+
+   if( ftruncate( (int)(intptr_t) _fd, (off_t) offset))
+      MulleObjCThrowErrnoException( @"ftruncate");
+}
+
 @end

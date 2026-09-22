@@ -69,7 +69,7 @@ static time_t    mulle_mini_tm_get_time( struct mulle_mini_tm mini)
    struct tm   tmp;
 
    mulle_posix_tm_init_with_mini_tm( &tmp, mini);
-   return( timegm( &tmp));  // not super sure this doesn't get corrupted
+   return( mulle_posix_tm_get_time( &tmp));
 }
 
 

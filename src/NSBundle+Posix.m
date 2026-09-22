@@ -93,21 +93,100 @@
 }
 
 
-- (NSString *) builtInPlugInsPath
+//
+// The _posix... variants hold the actual POSIX layout logic. They are also
+// used as a fallback by NSBundle( Darwin) when a bundle does not use the
+// macOS "Contents" layout (see NSBundle+Darwin.m).
+//
+- (NSString *) _posixBuiltInPlugInsPath
 {
-   return( [[self resourcePath] stringByAppendingPathComponent:@"plugin"]);
+   NSFileManager   *manager;
+   NSString        *path;
+   BOOL            isDir;
+
+   path    = [[self resourcePath] stringByAppendingPathComponent:@"plugin"];
+   manager = [NSFileManager defaultManager];
+   if( [manager fileExistsAtPath:path
+                     isDirectory:&isDir] && isDir)
+      return( path);
+   return( nil);
 }
 
 
-- (NSString *) _executablePath
+- (NSString *) _posixPathForAuxiliaryExecutable:(NSString *) executableName
+{
+   NSString   *path;
+
+   path = [[self executablePath] stringByDeletingLastPathComponent];
+   return( [path stringByAppendingPathComponent:executableName]);
+}
+
+
+- (NSString *) _posixPrivateFrameworksPath
+{
+   return( [[self resourcePath] stringByAppendingPathComponent:@"Frameworks"]);
+}
+
+
+- (NSString *) _posixSharedFrameworksPath
+{
+   return( [[self resourcePath] stringByAppendingPathComponent:@"SharedFrameworks"]);
+}
+
+
+- (NSString *) _posixSharedSupportPath
+{
+   return( [[self resourcePath] stringByAppendingPathComponent:@"SharedSupport"]);
+}
+
+
+- (NSString *) builtInPlugInsPath
+{
+   return( [self _posixBuiltInPlugInsPath]);
+}
+
+
+- (NSString *) pathForAuxiliaryExecutable:(NSString *) executableName
+{
+   return( [self _posixPathForAuxiliaryExecutable:executableName]);
+}
+
+
+- (NSString *) privateFrameworksPath
+{
+   return( [self _posixPrivateFrameworksPath]);
+}
+
+
+- (NSString *) sharedFrameworksPath
+{
+   return( [self _posixSharedFrameworksPath]);
+}
+
+
+- (NSString *) sharedSupportPath
+{
+   return( [self _posixSharedSupportPath]);
+}
+
+
+- (NSString *) _posixExecutablePath
 {
    NSFileManager   *fileManager;
+   BOOL            isDirectory;
    NSString        *lastComponent;
 
    if( ! _path)
       return( _path);
 
    fileManager = [NSFileManager defaultManager];
+
+   // a bundle is a directory and is searchable, but the directory is not
+   // the executable of the bundle
+   if( [fileManager fileExistsAtPath:_path
+                         isDirectory:&isDirectory] && isDirectory)
+      return( nil);
+
    if( [fileManager isExecutableFileAtPath:_path])
       return( _path);
    // .so files on Linux are not executable, but dlopen only needs +r
@@ -120,6 +199,12 @@
          return( _path);
    }
    return( nil);
+}
+
+
+- (NSString *) _executablePath
+{
+   return( [self _posixExecutablePath]);
 }
 
 
@@ -177,6 +262,8 @@
    path          = [NSString stringWithFormat:@"/pseudoproc/memory/%llx", classAddress];
    bundle        = [[[self alloc] _mulleInitWithPath:path
                                    sharedLibraryInfo:&libInfo] autorelease];
+   if( ! bundle)
+      bundle = [NSBundle mainBundle];
    return( bundle);
 #else
    // not sure how to get here though

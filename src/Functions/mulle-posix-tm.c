@@ -184,19 +184,6 @@ void   mulle_posix_tm_init_with_time( struct tm *tm, time_t time)
 }
 
 
-time_t  mulle_posix_tm_get_time( struct tm *tm)
-{
-   struct tm   tmp;
-
-   if( ! tm)
-      return( 0);
-
-   tmp = *tm;              // not super sure this doesn't get corrupted
-   return( timegm( &tmp));
-}
-
-
-
 void   mulle_posix_tm_init_with_interval1970( struct tm *tm,
                                               double timeInterval,
                                               int offset)

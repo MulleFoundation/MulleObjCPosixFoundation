@@ -111,6 +111,8 @@ id    mulle_locale_lconv_value( struct lconv *conv, int code);
 
 @interface NSLocale( Posix_PrivateFuture) < MulleObjCFuture>
 
-- (locale_t) xlocale;
+// the locale_t is created once in -init and is immutable afterwards, so
+// it can be shared with other threads (strftime_l/strptime_l only read it)
+- (locale_t) xlocale   MULLE_OBJC_THREADSAFE_METHOD;
 
 @end

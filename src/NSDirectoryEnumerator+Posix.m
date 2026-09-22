@@ -75,7 +75,20 @@
    _dir = opendir( s);
    if( ! _dir)
    {
+      BOOL   isDirectory;
+
       MulleObjCSetPosixErrorDomain();
+
+      // a filename yields an enumerator that enumerates nothing
+      if( [manager fileExistsAtPath:path
+                       isDirectory:&isDirectory] && ! isDirectory)
+      {
+         _manager       = [manager retain];
+         _rootPath      = [root copy];
+         _inheritedPath = [inherited copy];
+
+         return( self);
+      }
 
       [self release];
       return( nil);

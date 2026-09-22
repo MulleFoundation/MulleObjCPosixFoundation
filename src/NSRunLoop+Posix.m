@@ -46,6 +46,7 @@
 # define bzero( p, len)  memset( p, 0, len)  // used by FD_ZERO
 #endif
 #include <unistd.h>
+#include <stdlib.h>
 #include <sys/select.h>
 
 
@@ -136,6 +137,59 @@ static inline void   posix_mode_done( struct posix_mode *ctxt)
 // }
 
 
+static inline int   posix_mode_is_full( struct posix_mode *ctxt)
+{
+   return( ctxt->_n_handles >= ctxt->_s_handles);
+}
+
+
+static inline void   posix_mode_grow( struct posix_mode *ctxt)
+{
+   int      *buf;
+   size_t   size;
+
+   size = ctxt->_s_handles + ctxt->_s_handles;
+   buf  = mulle_malloc( size * sizeof( int));
+   memcpy( buf, ctxt->_handles, ctxt->_n_handles * sizeof( int));
+
+   if( ctxt->_handles != ctxt->_handle_space)
+      mulle_free( ctxt->_handles);
+
+   ctxt->_handles   = buf;
+   ctxt->_s_handles = (int) size;
+}
+
+
+static int   compare_fds( const void *a_p, const void *b_p)
+{
+   int   a;
+   int   b;
+
+   a = *(int *) a_p;
+   b = *(int *) b_p;
+   return( a - b);
+}
+
+
+static inline void   posix_mode_add_handle( struct posix_mode *ctxt, int fd)
+{
+   int   i;
+
+   assert( fd >= 0);
+
+   for( i = 0; i < ctxt->_n_handles; i++)
+      if( ctxt->_handles[ i] == fd)
+         return;
+
+   if( posix_mode_is_full( ctxt))
+      posix_mode_grow( ctxt);
+
+   ctxt->_handles[ ctxt->_n_handles++] = fd;
+   qsort( ctxt->_handles, ctxt->_n_handles, sizeof( int), compare_fds);
+   ctxt->_generation++;
+}
+
+
 static inline int   posix_mode_get_maxhandle( struct posix_mode *ctxt)
 {
    if( ctxt->_n_handles)
@@ -188,9 +242,8 @@ static inline void   posix_mode_set_fdset_handles( struct posix_mode *ctxt,
 
    assert( ctxt);
 
-   if( ctxt->_generation == ctxt->_set_generation)
-      return;
-   ctxt->_set_generation = ctxt->_generation;
+   // select() modifies the set in place, so rebuild it from scratch
+   FD_ZERO( set);
 
    p        = ctxt->_handles;
    sentinel = &p[ ctxt->_n_handles];
@@ -235,32 +288,39 @@ static inline struct posix_mode  *
 
 
 - (void) _notifyFileHandles:(struct posix_mode *) ctxt
-                        max:(int) max
 {
    int                           *fd_p;
    int                           *fd_sentinel;
    int                           fd;
    NSObject< _NSFileDescriptor>  *fileHandle;
 
-   // timeout
    [_readyHandles removeAllObjects];
 
    fd_p        = ctxt->_handles;
-   fd_sentinel = &fd_p[ max];
+   fd_sentinel = &fd_p[ ctxt->_n_handles];
    while( fd_p < fd_sentinel)
    {
       fd = *fd_p++;
       if( FD_ISSET( fd, &ctxt->_readSet))
       {
-         FD_CLR( fd, &ctxt->_readSet);
-
          fileHandle = NSMapGet( _fileHandleTable, (void *) (intptr_t) fd);
-         [_readyHandles addObject:fileHandle];
+         if( fileHandle)
+            [_readyHandles addObject:fileHandle];
       }
    }
 
    [_readyHandles makeObjectsPerformSelector:@selector(_notifyWithRunLoop:)
                                   withObject:self];
+}
+
+
+- (void) _addFileDescriptor:(int) fd
+                    forMode:(struct MulleRunLoopMode *) mode
+{
+   struct posix_mode   *ctxt;
+
+   ctxt = getOrCreatePosixMode( self, mode);
+   posix_mode_add_handle( ctxt, fd);
 }
 
 
@@ -384,8 +444,7 @@ posix_recalc:
       return( MulleRunLoopTimeout);
    }
 
-   [self _notifyFileHandles:ctxt
-                        max:rval];
+   [self _notifyFileHandles:ctxt];
    return( MulleRunLoopInputReceived);
 }
 
