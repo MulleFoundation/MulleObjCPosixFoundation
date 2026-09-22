@@ -38,12 +38,14 @@
 #import "import-private.h"
 
 #import <MulleObjCOSBaseFoundation/NSTask-Private.h>
+#import <MulleObjCOSBaseFoundation/NSFileManager.h>
 #import <MulleObjC/NSDebug.h>
 
 // other libraries of MulleObjCPosixFoundation
 #import "NSError+Posix.h"
 
 // std-c and dependencies
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -64,7 +66,19 @@
 
 
 
+static int   normalizedStatus( int status)
+{
+   if( WIFEXITED( status))
+      return( WEXITSTATUS( status));
+   if( WIFSIGNALED( status))
+      return( WTERMSIG( status));
+   return( status);
+}
+
+
 @implementation NSTask (Posix)
+
+@dependency NSTask;
 
 
 // static void   do_the_dup( int fd, id handle)
@@ -142,9 +156,11 @@ static void   trace_launch( char **envp, char **argv)
    char           **envp;
    char           **envp_storage;
    char           *c_environment_storage;
+   char           *dir;
    char           *next;
    char           *path;
    char           *s;
+   BOOL           isDir;
    id             *keys;
    id             *objects;
    int            fds[ 2][ 3];
@@ -165,6 +181,21 @@ static void   trace_launch( char **envp, char **argv)
    //
    path = [_launchPath fileSystemRepresentation];
    argc = [_arguments count];
+
+   //
+   // The child must run in the directory that was set (if any). Validate it
+   // in the parent, so that a bad directory fails the launch instead of
+   // silently running the child elsewhere.
+   //
+   dir = NULL;
+   if( _directoryPath)
+   {
+      if( ! [[NSFileManager defaultManager] fileExistsAtPath:_directoryPath
+                                                 isDirectory:&isDir] || ! isDir)
+         MulleObjCThrowInvalidArgumentException( @"%@ current directory \"%@\" is not an existing directory",
+                                                 self, _directoryPath);
+      dir = [_directoryPath fileSystemRepresentation];
+   }
 
    envp_storage          = NULL;
    c_environment_storage = NULL;
@@ -286,6 +317,12 @@ static void   trace_launch( char **envp, char **argv)
 #ifdef DEBUG_TASK
          mulle_fprintf( stderr, "task %d closes / dups handles\n", (int) getpid());
 #endif
+         if( dir && chdir( dir))
+         {
+            mulle_fprintf( stderr, "task %d could not chdir to %s (%d:%s)\n", (int) getpid(), dir, errno, strerror( errno));
+            _exit( 1);
+         }
+
          for( i = 0; i < 3; i++)
          {
             if( fds[ 0][ i])
@@ -348,6 +385,9 @@ static void   trace_launch( char **envp, char **argv)
 
 - (BOOL) mulleCheckIfRunning
 {
+   pid_t   pid;
+   int     status;
+
    switch( _status)
    {
    default :
@@ -359,10 +399,14 @@ static void   trace_launch( char **envp, char **argv)
 #ifdef DEBUG_TASK
       mulle_fprintf( stderr, "task %d checks for %d\n", (int) getpid(), (int) _pid);
 #endif
-      if( waitpid( _pid, &_terminationStatus, WNOHANG) == -1)
+      pid = waitpid( _pid, &status, WNOHANG);
+      if( pid == -1)
          return( YES);  // guess
-      if( ! WIFEXITED( _terminationStatus))
+      if( pid == 0)     // child is still alive
          return( YES);
+
+      _waitStatus        = status;
+      _terminationStatus = normalizedStatus( status);
 #ifdef DEBUG_TASK
       mulle_fprintf( stderr, "task %d considers %d terminated with %d\n",
                        (int) getpid(),
@@ -382,6 +426,8 @@ static void   trace_launch( char **envp, char **argv)
 
 - (void) waitUntilExit
 {
+   int   status;
+
    switch( _status)
    {
    default :
@@ -393,8 +439,10 @@ static void   trace_launch( char **envp, char **argv)
 #ifdef DEBUG_TASK
       mulle_fprintf( stderr, "task %d waits for %d\n", (int) getpid(), (int) _pid);
 #endif
-      if( waitpid( _pid, &_terminationStatus, 0) == -1)
+      if( waitpid( _pid, &status, 0) == -1)
          MulleObjCThrowErrnoException(  @"waitpid failed");
+      _waitStatus        = status;
+      _terminationStatus = normalizedStatus( status);
 #ifdef DEBUG_TASK
       mulle_fprintf( stderr, "task %d considers %d terminated with %d\n",
                        (int) getpid(),
@@ -407,6 +455,77 @@ static void   trace_launch( char **envp, char **argv)
    case _NSTaskHasTerminated      :
       break;
    }
+}
+
+
+- (BOOL) isRunning
+{
+   if( _status != _NSTaskIsPresumablyRunning)
+      return( NO);
+
+   return( [self mulleCheckIfRunning]);
+}
+
+
+- (void) _signal:(int) a_signal
+{
+   switch( _status)
+   {
+   default :
+      MulleObjCThrowInternalInconsistencyException( @"task not started");
+      break;
+
+   case _NSTaskIsPresumablyRunning :
+      NSParameterAssert( _pid);
+      kill( _pid, a_signal);
+      // fall thru
+
+   case _NSTaskHasTerminated :
+      break;
+   }
+}
+
+
+- (void) terminate
+{
+   [self _signal:SIGTERM];
+}
+
+
+- (void) interrupt
+{
+   [self _signal:SIGINT];
+}
+
+
+- (BOOL) suspend
+{
+   [self _signal:SIGSTOP];
+   return( YES);
+}
+
+
+- (BOOL) resume
+{
+   [self _signal:SIGCONT];
+   return( YES);
+}
+
+
+- (NSTaskTerminationReason) terminationReason
+{
+   switch( _status)
+   {
+   default :
+      MulleObjCThrowInternalInconsistencyException( @"task not terminated yet");
+
+   case _NSTaskHasTerminated :
+      break;
+   }
+
+   if( WIFEXITED( _waitStatus))
+      return( NSTaskTerminationReasonExit);
+   return( NSTaskTerminationReasonUncaughtSignal);
 }
 
 @end
