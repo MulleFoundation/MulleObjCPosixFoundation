@@ -43,10 +43,52 @@
 // other files in this library
 #import "NSLocale+Posix-Private.h"
 
+// other libraries
+#import <MulleObjCOSBaseFoundation/NSString+CString.h>
+
 // std-c and dependencies
 #include <locale.h>
 #include <langinfo.h>
+#include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
+
+
+// We want to *run* UTF-8, not adapt to the language of the user: the C
+// library is put into a UTF-8 character locale, so that everything it hands
+// back is UTF-8. Only LC_CTYPE is set, LC_NUMERIC and LC_TIME stay at "C",
+// which this library assumes for strtod, strftime and friends.
+//
+// "C.UTF-8" is the preferred name, but not every libc knows it, so the
+// language neutral spellings are tried first. If the system can not do UTF-8
+// at all, nothing happens and the C string encoding adapts to whatever is
+// available (see mulle_posix_cstring_encoding).
+void   mulle_posix_setup_utf8_locale( void)
+{
+   static char   *names[] =
+   {
+      "C.UTF-8", "C.utf8", "C.UTF8",
+      "en_US.UTF-8", "en_US.utf8",
+      "UTF-8",
+      NULL
+   };
+   char         *codeset;
+   char         **p;
+
+   codeset = nl_langinfo( CODESET);
+   if( codeset && ! strcmp( codeset, "UTF-8"))
+      return;
+
+   for( p = names; *p; p++)
+      if( setlocale( LC_CTYPE, *p))
+         return;
+}
+
+
+NSStringEncoding   mulle_posix_cstring_encoding( void)
+{
+   return( mulle_cstring_encoding_for_codeset( nl_langinfo( CODESET)));
+}
 
 
 #define match( key, identifier, type, code)               \
@@ -60,25 +102,58 @@ struct mulle_locale_key_info   mulle_locale_map_string_key_to_local_key( NSStrin
 {
    match( key, NSLocaleAlternateQuotationBeginDelimiterKey, -1, 0);
    match( key, NSLocaleAlternateQuotationEndDelimiterKey, -1, 0);
+   // a calendar is an NSCalendar object, which is above this library; the
+   // string that -calendarIdentifier answers does not need the OS either
    match( key, NSLocaleCalendar, -1, 0);
-   match( key, NSLocaleCollationIdentifier, QUERY_INFO, QUERY_COLLATION);
+   // collationIdentifier, collatorIdentifier, countryCode, languageCode,
+   // measurementSystem, the quotation and alternate quotation delimiters,
+   // scriptCode, usesMetricSystem and variantCode follow from the identifier
+   // alone, so they are answered platform independently by NSLocale (see
+   // -_derivedLocaleInfoForKey:). Asking the OS for the language is wrong: a
+   // locale that was constructed from an identifier keeps that identifier even
+   // when the OS has no data for it (and falls back to "C").
+   match( key, NSLocaleCollationIdentifier, -1, 0);
    match( key, NSLocaleCollatorIdentifier, -1, 0);
    match( key, NSLocaleCountryCode, -1, 0);
-   match( key, NSLocaleCurrencyCode, -1, 0);
+   // int_curr_symbol is the ISO 4217 code, which is what NSLocaleCurrencyCode
+   // documents
+   match( key, NSLocaleCurrencyCode, CONV_INFO, CONV_INT_CURRENCY_SYMBOL);
    match( key, NSLocaleCurrencySymbol, CONV_INFO, CONV_CURRENCY_SYMBOL);
    match( key, NSLocaleDecimalSeparator, CONV_INFO, CONV_DECIMAL_POINT);
+   // an exemplar character set is CLDR data, POSIX has no source for it
    match( key, NSLocaleExemplarCharacterSet, -1, 0);
-   match( key, NSLocaleGroupingSeparator, CONV_INFO, CONV_GROUPING);
+   // NSLocaleGroupingSeparator is the thousands separator, not the (internal)
+   // grouping pattern conv->grouping
+   match( key, NSLocaleGroupingSeparator, CONV_INFO, CONV_THOUSANDS_SEPERATOR);
    match( key, NSLocaleIdentifier, IDENTIFIER_INFO, 0);
-   match( key, NSLocaleLanguageCode, QUERY_INFO, QUERY_LANGUAGE);
+   match( key, NSLocaleLanguageCode, -1, 0);
    match( key, NSLocaleMeasurementSystem, -1, 0);
    match( key, NSLocaleQuotationBeginDelimiterKey, -1, 0);
    match( key, NSLocaleQuotationEndDelimiterKey, -1, 0);
    match( key, NSLocaleScriptCode, -1, 0);
    match( key, NSLocaleUsesMetricSystem, -1, 0);
-   match( key, NSLocaleVariantCode, QUERY_INFO, QUERY_VARIANT);
+   match( key, NSLocaleVariantCode, -1, 0);
 
    return( make_mulle_locale_key_info( ERROR_INFO, 0));
+}
+
+
+// int_curr_symbol is padded with a blank (and possibly other whitespace)
+static NSString   *mulle_locale_trimmed_string( char *s)
+{
+   char     buf[ 64];
+   size_t   len;
+
+   len = strlen( s);
+   while( len && (s[ len - 1] == ' ' || s[ len - 1] == '\t'))
+      --len;
+
+   if( len >= sizeof( buf))
+      return( [NSString stringWithCString:s]);
+
+   memcpy( buf, s, len);
+   buf[ len] = 0;
+   return( [NSString stringWithCString:buf]);
 }
 
 
@@ -127,7 +202,11 @@ id    mulle_locale_lconv_value( struct lconv *conv, int code)
    }
 
    if( s)
+   {
+      if( code == CONV_INT_CURRENCY_SYMBOL)
+         return( mulle_locale_trimmed_string( s));
       return( [NSString stringWithCString:s]);
+   }
 
    if( nr != -1)
       return( [NSNumber numberWithInt:nr]);
@@ -144,6 +223,9 @@ static mulle_thread_mutex_t   identifiersLock;
 
 + (void) load
 {
+   // run UTF-8, see mulle_posix_setup_utf8_locale
+   mulle_posix_setup_utf8_locale();
+
    if( mulle_thread_mutex_init( &identifiersLock))
       abort();
 }
@@ -161,27 +243,213 @@ static mulle_thread_mutex_t   identifiersLock;
    mulle_thread_mutex_done( &identifiersLock);
 }
 
-// So on linux the locale available from <locale.h> is basically the contents
-// of a compiled file /usr/lib/locale/locale-archive. There is no API to list
-// it's contents though it seems.
-// This file is generated from /usr/share/i18n and there there is an
-// index file SUPPORTED which lists all. It's not clear, even dubious,
-// that all SUPPORTED locales have been compiled.
+// How a POSIX libc knows its locales differs by family, and "locale -a" reads
+// the very same sources we read here, in process (instead of shelling out to
+// "/usr/bin/locale -a", which forks a shell, needs a writable temp directory
+// and silently degrades on hosts that lack either):
 //
-// The content is /usr/share/locale are just localized LC_MESSAGES for unix
-// tools it seems. Nothing we need. As long as we aren't running in a
-// containerized thingy, where we can execute "locale -a". This is the easiest
-// thing.
+//   glibc (Linux):  a single binary "locale-archive" that glibc mmaps, plus
+//                   one directory per locale below /usr/lib/locale for the
+//                   locales compiled outside the archive.
+//   BSD / Darwin:   one directory per locale below /usr/share/locale (the
+//                   _PATH_LOCALE, overridable with PATH_LOCALE). No archive.
+//
+// Neither has a public API, so we walk them ourselves.
+#define MULLE_LOCALE_SHARE_DIRECTORY      "/usr/share/locale"
+
+
+#if defined( __GLIBC__)
+// The archive layout is stable and documented in glibc <locale/locarchive.h>:
+//
+//   struct locarhead
+//   {
+//      uint32_t  magic;             // 0xde020109
+//      uint32_t  serial;
+//      uint32_t  namehash_offset;   // file offset of the name hash table
+//      uint32_t  namehash_used;
+//      uint32_t  namehash_size;     // number of slots in that table
+//      uint32_t  string_offset;     // file offset of the string table
+//      uint32_t  string_used;
+//      uint32_t  string_size;
+//      ... locrectab and sumhash follow
+//   };
+//   struct namehashent { uint32_t hashval, name_offset, locrec_offset; };
+//
+// All fields are host endian. name_offset is an absolute file offset into the
+// archive, an entry is occupied when locrec_offset is non-zero (the occupied
+// slots are not packed at the front), and the name is a NUL terminated C
+// string. This is the exact walk "locale -a" performs.
 //
 // https://www.man7.org/linux/man-pages/man1/localedef.1.html
-//
+#define MULLE_LOCALE_ARCHIVE             "/usr/lib/locale/locale-archive"
+#define MULLE_LOCALE_DIRECTORY           "/usr/lib/locale"
+
+#define MULLE_LOCALE_ARCHIVE_MAGIC       0xde020109U
+#define MULLE_LOCALE_ARCHIVE_MAGIC_SWAP  0x090102deU
+
+#define MULLE_LOCAR_NAMEHASH_OFFSET      2
+#define MULLE_LOCAR_NAMEHASH_SIZE        4
+#define MULLE_LOCAR_STRING_OFFSET        5
+#define MULLE_LOCAR_STRING_SIZE          7
+#define MULLE_LOCAR_HEADER_U32S          14
+#define MULLE_LOCAR_NAMEHASH_ENTRY_SIZE  12
+
+
+// The header and hash entries are uint32 in host byte order. The magic tells
+// a foreign endian archive apart, so a big endian host can read a little
+// endian archive and vice versa.
+static uint32_t   mulle_locale_read_u32( unsigned char *bytes, BOOL swap)
+{
+   uint32_t   value;
+
+   memcpy( &value, bytes, 4);
+   if( swap)
+      value = ((value & 0x000000FFU) << 24) |
+              ((value & 0x0000FF00U) <<  8) |
+              ((value & 0x00FF0000U) >>  8) |
+              ((value & 0xFF000000U) >> 24);
+   return( value);
+}
+#endif
+
+
+// Adds identifier to the ordered result, skipping empty names and the ones
+// that were collected before (the archive and the directory scan can overlap).
+static void   mulle_locale_add_identifier( NSMutableArray *result,
+                                           NSMutableSet *seen,
+                                           NSString *identifier)
+{
+   if( ! [identifier length])
+      return;
+   if( [seen containsObject:identifier])
+      return;
+   [seen addObject:identifier];
+   [result addObject:identifier];
+}
+
+
+#if defined( __GLIBC__)
+// Adds the locale names of the glibc locale archive to the result. Returns NO
+// if there is no readable archive (a stripped container image for instance).
+// A malformed archive is rejected rather than walked out of bounds.
+static BOOL   mulle_locale_collect_archive( NSMutableArray *result,
+                                            NSMutableSet *seen,
+                                            NSString *path)
+{
+   NSData         *data;
+   unsigned char  *bytes;
+   NSUInteger     length;
+   uint32_t       magic;
+   uint32_t       namehash_offset;
+   uint32_t       namehash_size;
+   uint32_t       string_offset;
+   uint32_t       string_size;
+   uint32_t       name_offset;
+   uint32_t       locrec_offset;
+   BOOL           swap;
+   NSUInteger     i;
+   NSUInteger     offset;
+   NSString       *name;
+
+   data = [NSData dataWithContentsOfFile:path];
+   if( ! data)
+      return( NO);
+
+   length = [data length];
+   if( length < MULLE_LOCAR_HEADER_U32S * 4)
+      return( NO);
+
+   bytes = (unsigned char *) [data bytes];
+
+   magic = mulle_locale_read_u32( bytes, NO);
+   swap  = (magic != MULLE_LOCALE_ARCHIVE_MAGIC);
+   if( swap && magic != MULLE_LOCALE_ARCHIVE_MAGIC_SWAP)
+      return( NO);
+
+   namehash_offset = mulle_locale_read_u32( bytes + MULLE_LOCAR_NAMEHASH_OFFSET * 4, swap);
+   namehash_size   = mulle_locale_read_u32( bytes + MULLE_LOCAR_NAMEHASH_SIZE   * 4, swap);
+   string_offset   = mulle_locale_read_u32( bytes + MULLE_LOCAR_STRING_OFFSET   * 4, swap);
+   string_size     = mulle_locale_read_u32( bytes + MULLE_LOCAR_STRING_SIZE     * 4, swap);
+
+   if( (uint64_t) namehash_offset +
+          (uint64_t) namehash_size * MULLE_LOCAR_NAMEHASH_ENTRY_SIZE > length)
+      return( NO);
+   if( (uint64_t) string_offset + string_size > length)
+      return( NO);
+
+   for( i = 0; i < namehash_size; i++)
+   {
+      offset        = namehash_offset + i * MULLE_LOCAR_NAMEHASH_ENTRY_SIZE;
+      name_offset   = mulle_locale_read_u32( bytes + offset + 4, swap);
+      locrec_offset = mulle_locale_read_u32( bytes + offset + 8, swap);
+
+      if( ! locrec_offset)   // empty hash slot
+         continue;
+      if( name_offset < string_offset || name_offset >= string_offset + string_size)
+         continue;
+
+      name = [NSString stringWithCString:(char *) bytes + name_offset];
+      mulle_locale_add_identifier( result, seen, name);
+   }
+   return( YES);
+}
+#endif
+
+
+// Adds the names of the per-locale directories below path. When marker is not
+// nil, a directory only counts as a locale when it carries that category
+// (glibc tags every real locale with LC_IDENTIFICATION, which tells it apart
+// from a directory that merely holds translations). "UTF-8" is the charmaps
+// pseudo entry that the BSD "locale -a" skips as well.
+static void   mulle_locale_collect_directories( NSMutableArray *result,
+                                                NSMutableSet *seen,
+                                                NSString *path,
+                                                NSString *marker)
+{
+   NSFileManager   *manager;
+   NSArray         *contents;
+   NSString        *name;
+   NSString        *child;
+   NSString        *probe;
+   BOOL            isDirectory;
+   NSUInteger      i;
+   NSUInteger      n;
+
+   manager  = [NSFileManager defaultManager];
+   contents = [manager directoryContentsAtPath:path];
+   n        = [contents count];
+   for( i = 0; i < n; i++)
+   {
+      name = [contents objectAtIndex:i];
+      if( [name hasPrefix:@"."])       // "." and "..", should the OS report them
+         continue;
+      if( [name isEqualToString:@"UTF-8"])
+         continue;
+
+      child = [path stringByAppendingPathComponent:name];
+      if( ! [manager fileExistsAtPath:child isDirectory:&isDirectory] || ! isDirectory)
+         continue;
+
+      if( marker)
+      {
+         probe = [child stringByAppendingPathComponent:marker];
+         if( ! [manager fileExistsAtPath:probe])
+            continue;
+      }
+      mulle_locale_add_identifier( result, seen, name);
+   }
+}
+
+
+// The enumeration costs a few file system reads (the archive can be several MB
+// big) and never changes for the lifetime of a process, so it is done at most
+// once and cached. The work happens outside the lock; two racing threads may
+// both enumerate and the first one to publish wins.
 + (NSArray *) availableLocaleIdentifiers
 {
-   NSArray    *result;
-   NSString   *command;
-   NSString   *tmpFile;
-   NSString   *name;
-   NSString   *s;
+   NSMutableArray   *collected;
+   NSMutableSet     *seen;
+   NSArray          *result;
 
    mulle_thread_mutex_lock( &identifiersLock);
    if( identifiers)
@@ -190,24 +458,52 @@ static mulle_thread_mutex_t   identifiersLock;
       mulle_thread_mutex_unlock( &identifiersLock);
       return( result);
    }
+   mulle_thread_mutex_unlock( &identifiersLock);
 
-   tmpFile     = NSTemporaryDirectory();
-   name        = [[NSProcessInfo processInfo] globallyUniqueString];
-   tmpFile     = [tmpFile stringByAppendingPathComponent:name];
-   tmpFile     = [tmpFile stringByAppendingPathExtension:@"txt"];
-   command     = [NSString stringWithFormat:@"/usr/bin/locale -e > \"%@\"", tmpFile];
-   if( ! system( [command cString]))
+   collected = [NSMutableArray array];
+   seen      = [NSMutableSet set];
+
+   // POSIX.2 4.34.3: "C" and "POSIX" are always available. They are the
+   // documented floor this method never goes below, even on a host whose
+   // locale data can not be found. The old code degraded silently to a
+   // hardcoded "en_US.utf8" list instead.
+   mulle_locale_add_identifier( collected, seen, @"C");
+   mulle_locale_add_identifier( collected, seen, @"POSIX");
+
+#if defined( __GLIBC__)
+   // glibc: the mmapped archive first, then the per-locale directories, so
+   // the order is stable
+   mulle_locale_collect_archive( collected, seen,
+                                 [NSString stringWithCString:MULLE_LOCALE_ARCHIVE]);
+   mulle_locale_collect_directories( collected, seen,
+                                     [NSString stringWithCString:MULLE_LOCALE_DIRECTORY],
+                                     @"LC_IDENTIFICATION");
+#else
+   // The BSD derived libcs: one directory per locale below _PATH_LOCALE
+   // (/usr/share/locale, overridable with PATH_LOCALE), no archive. This is
+   // what their "locale -a" scans as well.
    {
-      s           = [NSString stringWithContentsOfFile:tmpFile];
-      identifiers = [s componentsSeparatedByString:@"\n"];
+      char   *directory;
+
+      directory = getenv( "PATH_LOCALE");
+      if( ! directory)
+         directory = MULLE_LOCALE_SHARE_DIRECTORY;
+
+      mulle_locale_collect_directories( collected, seen,
+                                        [NSString stringWithCString:directory],
+                                        nil);
    }
-   [[NSFileManager defaultManager] _removeFileAtPath:tmpFile];
+#endif
 
-   if( ! [identifiers count])
-      identifiers  = @[ @"C", @"POSIX", @"en_US.utf8" ];
+   result = collected;
 
-   identifiers = [identifiers copy];
-   result      = identifiers;
+   mulle_thread_mutex_lock( &identifiersLock);
+   if( ! identifiers)
+   {
+      identifiers = [result copy];
+      [identifiers mulleSetThreadSafe:YES];
+   }
+   result = [[identifiers retain] autorelease];
    mulle_thread_mutex_unlock( &identifiersLock);
 
    return( result);
@@ -276,6 +572,24 @@ de_DE.plist
 }
 
 
+// inserts a codeset into "language[_country][.codeset][@modifier]"
+static NSString   *mulle_locale_identifier_with_codeset( NSString *identifier, NSString *codeset)
+{
+   NSArray    *components;
+   NSString   *base;
+   NSString   *modifier;
+
+   components = [identifier componentsSeparatedByString:@"@"];
+   base       = [[components objectAtIndex:0] stringByAppendingString:codeset];
+   if( [components count] > 1)
+   {
+      modifier = [components objectAtIndex:1];
+      base     = [base stringByAppendingString:[@"@" stringByAppendingString:modifier]];
+   }
+   return( base);
+}
+
+
 - (instancetype) initWithLocaleIdentifier:(NSString *) name
 {
    locale_t       xlocale;
@@ -283,9 +597,29 @@ de_DE.plist
 
    MulleObjCSetPosixErrorDomain();
 
-   xlocale = newlocale( LC_ALL_MASK, [name cString], NULL);
+   if( ! name)
+   {
+      [self release];
+      return( nil);
+   }
 
-   if( ! xlocale || ! name)
+   // POSIX locale names may omit the codeset (like "en_US"), but newlocale()
+   // rejects them then. Retry with the common UTF-8 spellings and, as a last
+   // resort, fall back to the portable "C" locale - a NSLocale should never
+   // be nil.
+   xlocale = newlocale( LC_ALL_MASK, [name UTF8String], NULL);
+   if( ! xlocale)
+      xlocale = newlocale( LC_ALL_MASK,
+                           [mulle_locale_identifier_with_codeset( name, @".UTF-8") UTF8String],
+                           NULL);
+   if( ! xlocale)
+      xlocale = newlocale( LC_ALL_MASK,
+                           [mulle_locale_identifier_with_codeset( name, @".utf8") UTF8String],
+                           NULL);
+   if( ! xlocale)
+      xlocale = newlocale( LC_ALL_MASK, "C", NULL);
+
+   if( ! xlocale)
    {
       [self release];
       return( nil);
@@ -300,8 +634,11 @@ de_DE.plist
    // messaged from any thread (it has no real thread affinity).
    [_keyValues mulleSetThreadSafe:YES];
 
+   // Precompute the keys that follow from the identifier (and merge in the
+   // locale's data file if it has one). That is what lets -objectForKey:
+   // answer them without taking _lock and without reparsing the identifier.
    auxInfo = [[self class] auxiliaryLocaleInfoForIdentifier:name];
-   [_keyValues addEntriesFromDictionary:auxInfo];
+   [self _setupDerivedLocaleValues:auxInfo];
 
    return( self);
 }
@@ -311,35 +648,12 @@ de_DE.plist
 {
    [_identifier release];
    [_keyValues release];
+   [_derivedValues release];
    [_lock release];
    if( _xlocale)
       freelocale( _xlocale);
 
    [super dealloc];
-}
-
-
-- (id) objectForKey:(id) key   MULLE_OBJC_THREADSAFE_METHOD
-{
-   id   value;
-
-   [_lock lock];
-   {
-      value = [_keyValues objectForKey:key];
-      if( value)
-      {
-         if( value == [NSNull null])
-            value = nil;
-      }
-      else
-      {
-         value = [self _localeInfoForKey:key];
-         [_keyValues setObject:value ? value : [NSNull null]
-                        forKey:key];
-      }
-   }
-   [_lock unlock];
-   return( value);
 }
 
 

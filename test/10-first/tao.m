@@ -9,7 +9,7 @@
 // possible, meaning make all object properties (and other instance variable
 // references to objects) non-threadsafe  (whereit makes sense).
 //
-@implementation MulleObjCPosixFoundation (TAOTest)
+@implementation NSFileHandle (TAOTest)
 
 - (void) mulleTAOTestSetup:(id) arg
 {
@@ -42,7 +42,7 @@
 int   main( int argc, char *argv[])
 {
    // either add all classes here, or copy this test for each class
-   MulleObjCTAOTest( [MulleObjCPosixFoundation class], nil);
+   MulleObjCTAOTest( [NSFileHandle class], nil);
 
    return( 0);
 }

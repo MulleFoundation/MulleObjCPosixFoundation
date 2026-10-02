@@ -128,7 +128,7 @@ MULLE_OBJC_DEPENDS_ON_LIBRARY( MulleObjCStandardFoundation);
    char     *c_end;
    NSDate   *date;
 
-   c_begin = [string cString];
+   c_begin = [string UTF8String];
    c_end   = c_begin;
    date    = [self _dateWithFormatUTF8String:_cformat
                            cStringPointer:&c_end];
@@ -150,7 +150,7 @@ MULLE_OBJC_DEPENDS_ON_LIBRARY( MulleObjCStandardFoundation);
    char     *c_str;
    NSDate   *date;
 
-   c_str = [s cString];
+   c_str = [s UTF8String];
    date  = [self _dateWithFormatUTF8String:_cformat
                          cStringPointer:&c_str];
    return( date);
@@ -412,8 +412,9 @@ static int   tm_sprintf_character( struct tm *tm,
                      formatUTF8String:(char *) c_format
                                locale:(NSLocale *) locale
 {
-   MULLE_C_UNUSED( locale );
-   //locale_t               xlocale;
+   locale_t               xlocale;
+   locale_t               old_xlocale;
+   BOOL                   changed_xlocale;
    char                   *s;
    char                   *input;
    char                   *sentinel;
@@ -429,6 +430,7 @@ static int   tm_sprintf_character( struct tm *tm,
    NSString               *abbreviation;
    char                   sign;
    NSUInteger             i;
+   BOOL                   hasTimeZone;
 
    if( ! string)
       return( nil);
@@ -444,10 +446,17 @@ static int   tm_sprintf_character( struct tm *tm,
 
    memset( &tm, 0, sizeof( tm));
 
-   //xlocale  = [locale xlocale];
-   timeZone = nil;
-   input    = *string;
-   ns       = 0;
+   // parse in the formatter's locale, never in the process-global locale
+   if( ! locale)
+      locale = [NSLocale currentLocale];
+   xlocale         = [locale xlocale];
+   old_xlocale     = NULL;
+   changed_xlocale = NO;
+
+   timeZone    = nil;
+   hasTimeZone = NO;
+   input       = *string;
+   ns          = 0;
 
    //
    // collect format characters until we hit %z or %Z, print easy stuff
@@ -526,7 +535,8 @@ static int   tm_sprintf_character( struct tm *tm,
          if( sign == 'Z')
          {
             ++input;
-            timeZone = nil;
+            timeZone    = nil;   // nil means GMT/UTC here
+            hasTimeZone = YES;
             continue;
          }
 
@@ -561,7 +571,8 @@ static int   tm_sprintf_character( struct tm *tm,
          seconds += hours * 60 * 60;
          if( sign == '-')
             seconds = - seconds;
-         timeZone = [NSTimeZone timeZoneForSecondsFromGMT:seconds];
+         timeZone    = [NSTimeZone timeZoneForSecondsFromGMT:seconds];
+         hasTimeZone = YES;
          continue;
 
       case 'Z' :
@@ -590,17 +601,29 @@ static int   tm_sprintf_character( struct tm *tm,
             errno = ENOENT;
             return( nil);
          }
+         hasTimeZone = YES;
          continue;
       }
 
       *q++ = *s;
       *q++ = 0;
 
-//      // there is no strptime_l on linux
-//      if( xlocale)
-//         input = strptime_l( input, strpformat, &tm, xlocale);
-//      else
+      // strptime(3) uses the process-global locale. uselocale only affects
+      // the calling thread (strptime_l would be finer, but is a GNU extension
+      // on glibc), and the previous value is always restored - including
+      // LC_GLOBAL_LOCALE, so a change is tracked with a flag not a sentinel.
+      if( xlocale)
+      {
+         old_xlocale     = uselocale( xlocale);
+         changed_xlocale = YES;
+      }
       input = strptime( input, strpformat, &tm);
+      if( changed_xlocale)
+      {
+         uselocale( old_xlocale);
+         changed_xlocale = NO;
+      }
+
       if( ! input)
       {
          errno = EINVAL;
@@ -609,6 +632,18 @@ static int   tm_sprintf_character( struct tm *tm,
    }
 
    *string = input;
+
+   //
+   // A format without a zone conversion must parse in the same zone that
+   // -stringFromDate: prints with: the formatter's timeZone, or the default
+   // timeZone. Otherwise parsing silently assumed GMT.
+   //
+   if( ! hasTimeZone)
+   {
+      timeZone = [self timeZone];
+      if( ! timeZone)
+         timeZone = [NSTimeZone defaultTimeZone];
+   }
 
    return( [[[_dateClass alloc] _initWithTM:&tm
                                 nanoseconds:ns

@@ -32,6 +32,21 @@
 //  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 //  POSSIBILITY OF SUCH DAMAGE.
 //
+//
+//  There used to be a fork, an execve, three dup2 and two closes in here, plus
+//  a waitpid and a kill. All of that is mulle-spawn now, which does the same
+//  thing on Windows and has the tests to show it -- and all of the *lifecycle*
+//  that used to follow it is `NSTask.m`, because there is nothing POSIX about
+//  it once the child is running.
+//
+//  What is left in this file is `launch`, which is the only part that differs
+//  from the Windows one: what the three standard streams are, and what the
+//  parent's own end of each of them has to be marked with so that the child
+//  does not inherit it.
+//
+//  The reference for what this has to keep doing is test/NSTask in
+//  MulleObjCOSFoundation, and the plan is SPAWN-TASK-PLAN.md in mulle-spawn.
+//
 #define _XOPEN_SOURCE 700
 #define _DEFAULT_SOURCE
 
@@ -39,40 +54,71 @@
 
 #import <MulleObjCOSBaseFoundation/NSTask-Private.h>
 #import <MulleObjCOSBaseFoundation/NSFileManager.h>
+#import <MulleObjCOSBaseFoundation/NSPipe.h>
 #import <MulleObjC/NSDebug.h>
 
 // other libraries of MulleObjCPosixFoundation
 #import "NSError+Posix.h"
 
 // std-c and dependencies
+#include <fcntl.h>
 #include <signal.h>
-#include <sys/types.h>
-#include <sys/wait.h>
+#include <string.h>
 #include <unistd.h>
 
-
-#define USE_FORK
-// #define DEBUG_TASK
-
-
-#ifdef USE_FORK
-# define vfork  fork
-# undef vfork_name
-# define vfork_name  "fork"
-#else
-# undef vfork_name
-# define vfork_name  "vfork"
-#endif
+// mulle-spawn is a constituent of mulle-core and arrives with the Objective-C
+// runtime's dependency on it, so the include is technically already there -- it
+// is spelled out anyway, because nothing else in this file would tell a reader
+// where mulle_spawn_* is from.
+#include <mulle-spawn/mulle-spawn.h>
 
 
-
-static int   normalizedStatus( int status)
+/*
+ * The parent's own end of a pipe must not reach the child. The child inherits
+ * every descriptor of ours a `fork` can see, and for stdin that includes the
+ * end the *parent* writes on -- so a child that reads its stdin to EOF would
+ * never get there, while its parent had long since closed its side.
+ *
+ * `FD_CLOEXEC` is the portable POSIX way to say "not this one": it is set
+ * before the fork, so the child's copy of it carries the flag, and the
+ * descriptor is closed as the child reaches its exec. It is taken back
+ * afterwards because the flag lives in the per-process descriptor table and
+ * the child already has its own copy -- the parent keeps its descriptor
+ * usable, which is the whole point.
+ *
+ * A descriptor below 3 is left alone: those are the process's own standard
+ * streams, and when one of them is the property, inheriting it is exactly what
+ * was asked for.
+ *
+ * Returns the previous flags, or -1 if nothing was changed.
+ */
+static int   markCloseOnExec( int fd)
 {
-   if( WIFEXITED( status))
-      return( WEXITSTATUS( status));
-   if( WIFSIGNALED( status))
-      return( WTERMSIG( status));
-   return( status);
+   int   flags;
+
+   if( fd < 3)
+      return( -1);
+
+   flags = fcntl( fd, F_GETFD);
+   if( flags == -1)
+      return( -1);
+
+   if( flags & FD_CLOEXEC)
+      return( -1);
+
+   if( fcntl( fd, F_SETFD, flags | FD_CLOEXEC) == -1)
+      return( -1);
+
+   return( flags);
+}
+
+
+static void   restoreCloseOnExec( int fd, int previousFlags)
+{
+   if( previousFlags < 0)
+      return;
+
+   (void) fcntl( fd, F_SETFD, previousFlags);
 }
 
 
@@ -81,451 +127,149 @@ static int   normalizedStatus( int status)
 @dependency NSTask;
 
 
-// static void   do_the_dup( int fd, id handle)
-// {
-//    int  other_fd;
-// 
-//    if( ! handle)
-//       return;
-// 
-//    //
-//    // Example: child stdin(0), pipe is [0/1] [read/write]
-//    // so parent "writes" into pipe[ 1] for child( 0) via pipe[ 0]
-//    // Ergo: child gets pipe[ 0] dupped
-//    //
-//    // Other example: child stdout(1), pipe is [0/1] [read/write]
-//    // so we "read" from pipe[ 0], where child( 1) writes into via pipe[ 1]
-//    // Ergo: child gets pipe[ 1] dupped
-//    //
-// 
-//    other_fd = (! fd)
-//               ? [handle _fileDescriptorForReading]
-//               : [handle _fileDescriptorForWriting];
-// 
-//    assert( ! fd || other_fd);
-// 
-//    if( other_fd != fd)
-//    {
-// #ifdef DEBUG_TASK
-//       mulle_fprintf( stderr, "task %d dup %d -> %d\n", (int) getpid(), other_fd, fd);
-// #endif
-//       close( fd);
-//       dup( other_fd);
-//    }
-// }
-
-static void   trace_launch( char **envp, char **argv)
-{
-   char  **s;
-   char  *key;
-   char  *value;
-
-   mulle_buffer_do( buffer)
-   {
-      for( s = envp; *s; s++)
-      {
-         key   = *s;
-         value = strchr( key, '=') + 1;
-         assert( value);
-
-         mulle_buffer_add_string_if_not_empty( buffer, " ");
-         mulle_buffer_add_bytes( buffer, key, value - key);
-         mulle_buffer_add_c_string( buffer, value);
-      }
-
-      for( s = argv; *s; s++)
-      {
-         mulle_buffer_add_string_if_not_empty( buffer, " ");
-         mulle_buffer_add_c_string( buffer, *s);
-      }
-
-      mulle_fprintf( stderr, "%s\n", mulle_buffer_get_string( buffer));
-   }
-}
-
-
-//
-// Because the launchPath will be used to exec another executable immediately
-// vfork is the sensible choice. It also stops the parent process until
-// execve is run, which seems kinda desired behaviour by itself
-//
-// TODO: create a -fork co-process functionality without a launchPath ?
-//
 - (void) launch
 {
-   char           **envp;
-   char           **envp_storage;
-   char           *c_environment_storage;
-   char           *dir;
-   char           *next;
-   char           *path;
-   char           *s;
-   BOOL           isDir;
-   id             *keys;
-   id             *objects;
-   int            fds[ 2][ 3];
-   int            rval;
-   NSUInteger     argc;
-   NSUInteger     i;
-   NSUInteger     len;
-   NSUInteger     n;
-   pid_t          pid;
+   struct mulle_spawn_options   options;
+   struct mulle_spawn_handle    *handle;
+   char                         **argv;
+   char                         **envp;
+   char                         **arguments;
+   void                         *envAllocation;
+   char                         *path;
+   BOOL                         isDir;
+   NSUInteger                   argc;
+   NSUInteger                   i;
+   int                          child[ 3];    // what the child gets to talk on
+   int                          parent[ 3];   // what the parent keeps
+   int                          kept[ 3];     // the flags markCloseOnExec set
+   int                          rval;
+   int                          err;
 
    MulleObjCSetPosixErrorDomain();
 
    //
-   // path is autoreleased and argv is on the stack
-   // is this a problem ?
-   // if we "vfork" then parent is suspended until execve (no problem)
-   // if we "fork" then everything should be copied into the fork (no problem)
+   // The child runs in the directory that was set (if any). mulle-spawn
+   // refuses the same directory for the same reason, but its complaint is an
+   // errno -- and a caller who named a directory is owed the name of it.
    //
-   path = [_launchPath fileSystemRepresentation];
-   argc = [_arguments count];
-
-   //
-   // The child must run in the directory that was set (if any). Validate it
-   // in the parent, so that a bad directory fails the launch instead of
-   // silently running the child elsewhere.
-   //
-   dir = NULL;
    if( _directoryPath)
-   {
       if( ! [[NSFileManager defaultManager] fileExistsAtPath:_directoryPath
                                                  isDirectory:&isDir] || ! isDir)
          MulleObjCThrowInvalidArgumentException( @"%@ current directory \"%@\" is not an existing directory",
                                                  self, _directoryPath);
-      dir = [_directoryPath fileSystemRepresentation];
-   }
 
-   envp_storage          = NULL;
-   c_environment_storage = NULL;
+   path = [_launchPath fileSystemRepresentation];
+   argc = [_arguments count];
 
-   // though I could swear I read somewhere, that execve will inherit the
-   // current environment on NULL, it ain't happening for me on Linux here
-   // so we do: _environment = nil (get Task environment), otherwise supplant
-   // so to have a clean environment set it to @{}.
-   //
-   // convert our Objective-C environment into a C envstring, we use
-   // two mallocs for this, which is kinda shabby ;)
-   //
-   if( ! _environment)
-   {
-      envp = [NSTask _environment];
-   }
-   else
-   {
-      n            = [_environment count];
-      envp         =
-      envp_storage = mulle_malloc( sizeof( id) * 2 * (n + 1));
-      keys         = (id *) envp;
-      objects      = &keys[ n];
+   argv       = mulle_malloc( (argc + 2) * sizeof( char *));
+   argv[ 0]   = path;
+   argv[argc + 1] = NULL;
 
-      [_environment getObjects:objects
-                       andKeys:keys
-                         count:n];
+   assert( sizeof( id) == sizeof( char *));
+   arguments = &argv[ 1];
+   [_arguments getObjects:(id *) arguments];
+   for( i = 0; i < argc; i++)
+      arguments[ i] = (char *) [(id) arguments[ i] UTF8String];
 
-      // create buffer and print all key/value pairs, '\n' will
-      // be later replaced by '\0', remember length of each line
-      // in keys
-      mulle_buffer_do( buffer)
-      {
-         for( i = 0; i < n; i++)
-         {
-            mulle_buffer_sprintf( buffer, "%s=%s%tn\n",
-                                          [keys[ i] UTF8String],
-                                          [objects[ i] UTF8String],
-                                          &len);
-            keys[ i] = (id) len;
-         }
-         // extract from buffer, so now permanent
-         s = mulle_buffer_extract_string( buffer);
-      }
+   envp = mulleNSTaskEnvironmentStrings( _environment, &envAllocation);
 
-      // remember for later dealloc
-      c_environment_storage = s;
-
-      // now \0 terminate each string, and place it into envp
-      for( i = 0; i < n; i++)
-      {
-         len      = (NSUInteger) keys[ i];
-         next     = &s[ len];
-         *next++  = 0;
-         envp[ i] = s;
-         s        = next;
-      }
-      envp[ n] = NULL;
-   }
+   mulle_spawn_options_init( &options);
+   options.env       = envp;
+   options.directory = _directoryPath ? [_directoryPath fileSystemRepresentation] : NULL;
 
    //
-   // Objective-C is NOT a good idea inside the vfork child.
-   // It's not a problem though after fork.
+   // The child reads its stdin where the caller writes, and writes its stdout
+   // and stderr where the caller reads. The other end each time is the
+   // parent's, and it is the one the child must not be left holding.
    //
-   fds[ 0][ 0] = [_standardInput  _fileDescriptorForWriting];
-   fds[ 0][ 1] = [_standardOutput _fileDescriptorForReading];
-   fds[ 0][ 2] = [_standardError  _fileDescriptorForReading];
+   child[ 0]  = [_standardInput  _fileDescriptorForReading];
+   child[ 1]  = [_standardOutput _fileDescriptorForWriting];
+   child[ 2]  = [_standardError  _fileDescriptorForWriting];
 
-   fds[ 1][ 0] = [_standardInput  _fileDescriptorForReading];
-   fds[ 1][ 1] = [_standardOutput _fileDescriptorForWriting];
-   fds[ 1][ 2] = [_standardError  _fileDescriptorForWriting];
+   parent[ 0] = [_standardInput  _fileDescriptorForWriting];
+   parent[ 1] = [_standardOutput _fileDescriptorForReading];
+   parent[ 2] = [_standardError  _fileDescriptorForReading];
+
+   kept[ 0] = kept[ 1] = kept[ 2] = -1;
 
    for( i = 0; i < 3; i++)
    {
-      assert( ! fds[ 0][ i] || fds[ 0][ i] > 2);
-      assert( ! fds[ 1][ i] || fds[ 1][ i] > 2);
+      if( ! child[ i])
+         continue;
+
+      kept[ i] = markCloseOnExec( parent[ i]);
+
+      switch( i)
+      {
+      case 0  : options.in_mode       = MULLE_SPAWN_DESCRIPTOR;
+                options.in_descriptor  = child[ 0];
+                break;
+
+      case 1  : options.out_mode      = MULLE_SPAWN_DESCRIPTOR;
+                options.out_descriptor = child[ 1];
+                break;
+
+      default : options.err_mode      = MULLE_SPAWN_DESCRIPTOR;
+                options.err_descriptor = child[ 2];
+                break;
+      }
    }
 
+   if( NSDebugEnabled)
    {
-      char  *argv[ argc + 2];
-
-      assert( sizeof( id) == sizeof( char *));
-
-      [_arguments getObjects:(id *) &argv[ 1]];
-      for( i = 1; i <= argc; i++)
-         argv[ i] = (char *) [(id) argv[ i] cString];
-      assert( i < argc + 2);
-      argv[ i] = 0;
-      argv[ 0] = path;  // [[_launchPath lastPathComponent] cString];
-
-      if( NSDebugEnabled)
-         trace_launch( envp, argv);
-
-#ifdef DEBUG_TASK
-      mulle_fprintf( stderr, "task %d starts\n", (int) getpid());
-#endif
-      _status = _NSTaskIsPresumablyRunning;
-
-#ifdef DEBUG_TASK
-      mulle_fprintf( stderr, "task %d %s\n", (int) getpid(), vfork_name);
-#endif
-#ifdef DEBUG_TASK
-      {
-         char   *sep = "";
-
-         mulle_fprintf( stderr, "task %d %s with \"%s\" (", (int) getpid(), vfork_name, path);
-         for( i = 0; i <= argc; i++)
-         {
-            mulle_fprintf( stderr, "%s%s", sep, argv[ i]);
-            sep = " ";
-         }
-         mulle_fprintf( stderr, ")\n");
-      }
-#endif
-
-      if( ! (pid = vfork()))
-      {
-         // output this first before stderr gets redirected
-#ifdef DEBUG_TASK
-         mulle_fprintf( stderr, "task %d closes / dups handles\n", (int) getpid());
-#endif
-         if( dir && chdir( dir))
-         {
-            mulle_fprintf( stderr, "task %d could not chdir to %s (%d:%s)\n", (int) getpid(), dir, errno, strerror( errno));
-            _exit( 1);
-         }
-
-         for( i = 0; i < 3; i++)
-         {
-            if( fds[ 0][ i])
-            {
-               rval = close( fds[ 0][ i]);
-               if( rval == -1)
-               {
-                  mulle_fprintf( stderr, "task %d could not close filehandle %d properly (%d:%s)\n", (int) getpid(), fds[ 0][ i], errno, strerror( errno));
-                  _exit( 1);
-               }
-               rval = close( i);
-               if( rval == -1)
-               {
-                  mulle_fprintf( stderr, "task %d could not close filehandle %d properly (%d:%s)\n", (int) getpid(), (int) i, errno, strerror( errno));
-                  _exit( 1);
-               }
-               rval = dup( fds[ 1][ i]);
-               if( rval == -1)
-               {
-                  mulle_fprintf( stderr, "task %d could not dup filehandle %d properly (%d:%s)\n", (int) getpid(), fds[ 1][ i], errno, strerror( errno));
-                  _exit( 1);
-               }
-            }
-         }
-
-         execve( path, (char **) argv, envp);
-
-         // oughta be back in "parent" here in vfork case or ?
-         _status = _NSTaskHasFailedLaunching;
-         // error
-         mulle_fprintf( stderr, "task %d could not launch %s (%d:%s)\n", (int) getpid(), path, errno, strerror( errno));
-         _exit( 1);
-      }
-
-      if( pid < 0)
-         MulleObjCThrowInvalidArgumentException( @"%@ could not %s", self, vfork_name);
+      mulle_fprintf( stderr, "task %d launches \"%s\"", (int) getpid(), path);
+      for( i = 0; i < argc; i++)
+         mulle_fprintf( stderr, " %s", arguments[ i]);
+      mulle_fprintf( stderr, "\n");
    }
-   _pid = pid;
 
-#ifdef DEBUG_TASK
-   mulle_fprintf( stderr, "task %d %s -> %d\n", (int) getpid(), vfork_name, (int) pid);
-#endif
-
-#ifdef DEBUG_TASK
-   mulle_fprintf( stderr, "task %d closes handles\n", (int) getpid());
-#endif
-
-   mulle_free( envp_storage);
-   mulle_free( c_environment_storage);
+   handle = mulle_malloc( sizeof( struct mulle_spawn_handle));
+   rval   = mulle_spawn_open_with_options( handle, argv, &options);
+   err    = errno;
 
    for( i = 0; i < 3; i++)
-      if( fds[ 1][ i])
-      {
-         rval = close( fds[ 1][ i]);
-         if( rval == -1)
-            MulleObjCThrowInvalidArgumentException( @"parent task %d could not close filehandle %d properly (%s)\n", (int) getpid(), fds[ 1][ i], strerror( errno));
-      }
-}
+      restoreCloseOnExec( parent[ i], kept[ i]);
 
+   mulle_free( envAllocation);
+   mulle_free( argv);
 
-- (BOOL) mulleCheckIfRunning
-{
-   pid_t   pid;
-   int     status;
-
-   switch( _status)
+   //
+   // A child that could not be started at all is no longer a launch that
+   // "succeeded" and a task that reports exit 127: the caller is told, and
+   // `errno` says why. mulle-spawn waits for the child to reach its exec
+   // before returning, so a 0 here means the program really is running.
+   //
+   if( rval == -1)
    {
-   default :
-      MulleObjCThrowInternalInconsistencyException( @"task not started");
-      break;
+      mulle_free( handle);
 
-   case _NSTaskIsPresumablyRunning :
-      NSParameterAssert( _pid);
-#ifdef DEBUG_TASK
-      mulle_fprintf( stderr, "task %d checks for %d\n", (int) getpid(), (int) _pid);
-#endif
-      pid = waitpid( _pid, &status, WNOHANG);
-      if( pid == -1)
-         return( YES);  // guess
-      if( pid == 0)     // child is still alive
-         return( YES);
-
-      _waitStatus        = status;
-      _terminationStatus = normalizedStatus( status);
-#ifdef DEBUG_TASK
-      mulle_fprintf( stderr, "task %d considers %d terminated with %d\n",
-                       (int) getpid(),
-                       (int) _pid,
-                       (int) _terminationStatus);
-#endif
-      _status = _NSTaskHasTerminated;
-      // fall thru
-
-   case _NSTaskHasFailedLaunching :
-   case _NSTaskHasTerminated      :
-      break;
-   }
-   return( NO);
-}
-
-
-- (void) waitUntilExit
-{
-   int   status;
-
-   switch( _status)
-   {
-   default :
-      MulleObjCThrowInternalInconsistencyException( @"task not started");
-      break;
-
-   case _NSTaskIsPresumablyRunning :
-      NSParameterAssert( _pid);
-#ifdef DEBUG_TASK
-      mulle_fprintf( stderr, "task %d waits for %d\n", (int) getpid(), (int) _pid);
-#endif
-      if( waitpid( _pid, &status, 0) == -1)
-         MulleObjCThrowErrnoException(  @"waitpid failed");
-      _waitStatus        = status;
-      _terminationStatus = normalizedStatus( status);
-#ifdef DEBUG_TASK
-      mulle_fprintf( stderr, "task %d considers %d terminated with %d\n",
-                       (int) getpid(),
-                       (int) _pid,
-                       (int) _terminationStatus);
-#endif
-      _status = _NSTaskHasTerminated;
-
-   case _NSTaskHasFailedLaunching :
-   case _NSTaskHasTerminated      :
-      break;
-   }
-}
-
-
-- (BOOL) isRunning
-{
-   if( _status != _NSTaskIsPresumablyRunning)
-      return( NO);
-
-   return( [self mulleCheckIfRunning]);
-}
-
-
-- (void) _signal:(int) a_signal
-{
-   switch( _status)
-   {
-   default :
-      MulleObjCThrowInternalInconsistencyException( @"task not started");
-      break;
-
-   case _NSTaskIsPresumablyRunning :
-      NSParameterAssert( _pid);
-      kill( _pid, a_signal);
-      // fall thru
-
-   case _NSTaskHasTerminated :
-      break;
-   }
-}
-
-
-- (void) terminate
-{
-   [self _signal:SIGTERM];
-}
-
-
-- (void) interrupt
-{
-   [self _signal:SIGINT];
-}
-
-
-- (BOOL) suspend
-{
-   [self _signal:SIGSTOP];
-   return( YES);
-}
-
-
-- (BOOL) resume
-{
-   [self _signal:SIGCONT];
-   return( YES);
-}
-
-
-- (NSTaskTerminationReason) terminationReason
-{
-   switch( _status)
-   {
-   default :
-      MulleObjCThrowInternalInconsistencyException( @"task not terminated yet");
-
-   case _NSTaskHasTerminated :
-      break;
+      errno = err;
+      MulleObjCThrowInvalidArgumentException( @"%@ could not launch \"%@\" (%s)",
+                                              self, _launchPath, strerror( err));
    }
 
-   if( WIFEXITED( _waitStatus))
-      return( NSTaskTerminationReasonExit);
-   return( NSTaskTerminationReasonUncaughtSignal);
+   _pid        = (int) handle->pid;
+   _taskHandle = handle;
+   _status     = _NSTaskIsRunning;
+
+   //
+   // The child has its own copies of these now, and the parent still holding
+   // the child's end of a pipe is what keeps `readDataToEndOfFile` from ever
+   // finding EOF. Only a pipe's end is given up: a descriptor of the caller's
+   // own -- a file, say -- stays the caller's, exactly as mulle-spawn's
+   // descriptor mode promises.
+   //
+   // It is given up through the NSPipe that owns it rather than with a raw
+   // `close`, so that the fd and the object agree afterwards: a later
+   // `closeFile` on it is then a no-op instead of a second close of a number
+   // the system may have handed out again.
+   //
+   if( [_standardInput isKindOfClass:[NSPipe class]])
+      [[_standardInput fileHandleForReading] closeFile];
+   if( [_standardOutput isKindOfClass:[NSPipe class]])
+      [[_standardOutput fileHandleForWriting] closeFile];
+   if( [_standardError isKindOfClass:[NSPipe class]])
+      [[_standardError fileHandleForWriting] closeFile];
 }
 
 @end

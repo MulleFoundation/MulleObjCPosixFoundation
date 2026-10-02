@@ -130,6 +130,7 @@ int   mulle_posix_tm_from_string_with_format( struct tm *tm,
 {
    char           *c_str;
    locale_t       old_xlocale;
+   int            changed_xlocale;
    struct tm      now;
    time_t         nowtimeval;
    unsigned int   n;
@@ -139,16 +140,23 @@ int   mulle_posix_tm_from_string_with_format( struct tm *tm,
 
    mulle_posix_tm_invalidate( tm);
 
-   old_xlocale = (locale_t) -1;
+   // MEMO: don't use (locale_t) -1 as "nothing was changed" marker, because
+   //       uselocale() returns exactly that (LC_GLOBAL_LOCALE) when the thread
+   //       was using the process-global locale. That would skip the restore
+   //       and leave the thread stranded on the passed-in locale.
+   changed_xlocale = 0;
    if( locale)
-      old_xlocale = uselocale( locale);
+   {
+      old_xlocale     = uselocale( locale);
+      changed_xlocale = 1;
+   }
 
    // TODO: we don't parse %F correctly, but strptime doesn't know it.
    //       and tm doesn't know it either.
    c_str     = *c_str_p;
    *c_str_p  = strptime( c_str, c_format, tm);
 
-   if( old_xlocale != (locale_t) -1)
+   if( changed_xlocale)
       uselocale( old_xlocale);
 
    if( ! *c_str_p)

@@ -72,7 +72,6 @@ enum
    QUERY_LANGUAGE,
    QUERY_SCRIPT,
    QUERY_VARIANT
-
 };
 
 enum
@@ -107,6 +106,22 @@ enum
 struct mulle_locale_key_info   mulle_locale_map_string_key_to_local_key( NSString *key);
 
 id    mulle_locale_lconv_value( struct lconv *conv, int code);
+
+
+// The C string encoding of the process: the codeset the C library is
+// currently set to. Normally that is UTF-8, because the library establishes
+// a UTF-8 character locale at load time (see below). Only on a system that
+// can not do UTF-8 does this report (and the library therefore use) something
+// else.
+NSStringEncoding   mulle_posix_cstring_encoding( void);
+
+
+// Establishes a UTF-8 character locale, so that the C library hands back
+// UTF-8 (nl_langinfo, strftime, mbrtowc ...). Only LC_CTYPE is changed, so
+// that strtod and friends keep the "C" behaviour this library assumes. Does
+// nothing if UTF-8 is already in effect, or if the system has no UTF-8
+// locale at all.
+void   mulle_posix_setup_utf8_locale( void);
 
 
 @interface NSLocale( Posix_PrivateFuture) < MulleObjCFuture>

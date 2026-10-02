@@ -173,7 +173,28 @@ struct rule {
 #endif /* !defined TZ_STRLEN_MAX */
 
 
-static char  *_TZDIR = TZDIR;
+/*
+** The zoneinfo directory can be overridden at runtime, so that a consumer
+** can point at a non-standard database (Nix, the BSDs) without a rebuild.
+** MULLE_TZDIR wins, then the conventional TZDIR, then the compiled-in
+** default. Earlier tzcode used a static _TZDIR initialized to TZDIR, which
+** meant the tzcode default "/usr/local/etc/zoneinfo" (nonexistent on Linux)
+** was silently used and every named zone resolved to GMT.
+*/
+static char  *_mulle_tzdir( void)
+{
+   char   *s;
+
+   s = getenv( "MULLE_TZDIR");
+   if( s && *s)
+      return( s);
+
+   s = getenv( "TZDIR");
+   if( s && *s)
+      return( s);
+
+   return( (char *) TZDIR);
+}
 
 
 struct tz_context
@@ -190,6 +211,7 @@ struct tz_context
    char		lcl_TZname[TZ_STRLEN_MAX + 1];
    int		lcl_is_set;
    int		gmt_is_set;
+   int		lcl_load_failed;	/* mulle: set when the load fell back to GMT */
 
    char         *tzname[2];
 
@@ -443,8 +465,8 @@ register const int		doextend;
 			++name;
 		doaccess = name[0] == '/';
 		if (!doaccess) {
-			if ((p = _TZDIR) == NULL)
-				goto oops;
+		if ((p = _mulle_tzdir()) == NULL)
+			goto oops;
 			if ((strlen(p) + strlen(name) + 1) >= sizeof fullname)
 				goto oops;
 			(void) strcpy(fullname, p);
@@ -1273,6 +1295,8 @@ register const char *	name;
 	if (self->lcl_is_set)
 		(void) strcpy(self->lcl_TZname, name);
 
+	self->lcl_load_failed = 0;
+
 #ifdef ALL_STATE
 	if (self->lclptr == NULL) {
 		self->lclptr = (struct state *) calloc(1, sizeof *self->lclptr);
@@ -1293,9 +1317,13 @@ register const char *	name;
 		self->lclptr->ttis[0].tt_gmtoff = 0;
 		self->lclptr->ttis[0].tt_abbrind = 0;
 		(void) strcpy(self->lclptr->chars, gmt);
+		self->lcl_load_failed = 1;
 	} else if (tzload(name, self->lclptr, TRUE) != 0)
 		if (name[0] == ':' || tzparse(name, self->lclptr, FALSE) != 0)
+		{
 			(void) gmtload(self->lclptr);
+			self->lcl_load_failed = 1;
+		}
 	_settzname( self);
 }
 
@@ -2257,7 +2285,28 @@ void   *mulle_tz_context_with_name( char *name, size_t *size)
    if( ! p)
       return( p);
 
+   if( ! name)
+   {
+      free( p);
+      if( size)
+         *size = 0;
+      return( NULL);
+   }
+
    __tzset( p, name);
+
+   /*
+   ** A name that could not be loaded must not look like a successful load.
+   ** __tzset() silently falls back to GMT; report that instead of handing
+   ** back a plausible-looking offset-0 zone.
+   */
+   if( p->lcl_load_failed)
+   {
+      free( p);
+      if( size)
+         *size = 0;
+      return( NULL);
+   }
 
    return( p);
 }
@@ -2330,7 +2379,7 @@ static char  *path_to_zoneinfo_file( char *name, char *buf, size_t buflen)
 {
    char   *p;
 
-   if ((p = _TZDIR) == NULL)
+   if ((p = _mulle_tzdir()) == NULL)
       return( NULL);
    if ((strlen( p) + strlen(name) + 1) >= buflen)
       return( NULL);
@@ -2344,7 +2393,7 @@ static char  *path_to_zoneinfo_file( char *name, char *buf, size_t buflen)
 
 char  *_mulle_get_zoneinfo_path()
 {
-   return( _TZDIR);
+   return( _mulle_tzdir());
 }
 
 

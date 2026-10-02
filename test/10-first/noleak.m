@@ -10,6 +10,6 @@ int   main( int argc, char *argv[])
 
    // needs MulleFoundation for the NSConstantString class. If this is just
    // linked with MulleObjC this will crash because of the %@ conversion
-   mulle_printf( "%@\n", @"VfL Bochum <missing number, please fix>");
+   mulle_printf( "%@\n", @"VfL Bochum 1848");
    return( 0);
 }

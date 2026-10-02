@@ -52,9 +52,17 @@
    size_t     size;
    void       *info;
 
-   NSParameterAssert( [name isKindOfClass:[NSString class]]);
-
    [self init];
+
+   /*
+   ** Darwin answers nil for a nil name; NSParameterAssert would abort.
+   ** A non-NSString argument is likewise not a timezone name.
+   */
+   if( ! [name isKindOfClass:[NSString class]])
+   {
+      [self release];
+      return( nil);
+   }
 
    info = mulle_tz_context_with_name( (char *) [name cString], &size);
    if( ! info)
@@ -74,15 +82,33 @@
 
 + (NSTimeZone  *) _uncachedSystemTimeZone
 {
-   NSString  *name;
-   char      *s;
+   NSTimeZone   *timeZone;
+   NSString     *name;
+   char         *s;
 
+   /*
+   ** TZ wins when it is set and usable. It may be a zone name, an absolute
+   ** path or a POSIX TZ string; timeZoneWithName: handles all three.
+   */
    s = getenv( "TZ");
-   if( ! s)
-      return( [_MulleGMTTimeZone sharedInstance]);
+   if( s && *s)
+   {
+      name     = [NSString stringWithCString:s];
+      timeZone = [NSTimeZone timeZoneWithName:name];
+      if( timeZone)
+         return( timeZone);
+   }
 
-   name = [NSString stringWithCString:s];
-   return( [NSTimeZone timeZoneWithName:name]);
+   /*
+   ** With no usable TZ, the system zone lives in /etc/localtime, a tzfile
+   ** (or symlink to one). An absolute path loads it directly, which is the
+   ** normal desktop Linux case where TZ is unset.
+   */
+   timeZone = [NSTimeZone timeZoneWithName:@"/etc/localtime"];
+   if( timeZone)
+      return( timeZone);
+
+   return( [_MulleGMTTimeZone sharedInstance]);
 }
 
 

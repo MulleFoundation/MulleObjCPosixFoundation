@@ -99,7 +99,8 @@ struct mulle_mini_tm   mulle_posix_tm_get_mini_tm( struct tm *src)
    }
 
    dst.year   = src->tm_year + 1900;
-   dst.month  = src->tm_mon;
+   // mulle_mini_tm months are 1-based, struct tm months are 0-based
+   dst.month  = src->tm_mon + 1;
    dst.day    = src->tm_mday;
    dst.hour   = src->tm_hour;
    dst.minute = src->tm_min;
@@ -118,7 +119,8 @@ static inline void  mulle_posix_tm_init_with_mini_tm( struct tm *dst,
    memset( dst, 0, sizeof( *dst)); // most compatible, though wasteful
 
    dst->tm_year   = src.year - 1900;
-   dst->tm_mon    = src.month;
+   // mulle_mini_tm months are 1-based, struct tm months are 0-based
+   dst->tm_mon    = src.month - 1;
    dst->tm_mday   = src.day;
    dst->tm_hour   = src.hour;
    dst->tm_min    = src.minute;

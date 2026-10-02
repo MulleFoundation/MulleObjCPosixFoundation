@@ -76,7 +76,14 @@ struct tz_tm {
 #define TM_GMTOFF  tm_gmtoff
 #define TM_ZONE    tm_zone
 
-#ifdef __APPLE__
+/*
+** tzcode defaults TZDIR to "/usr/local/etc/zoneinfo", which does not exist
+** on Linux or any other FHS system. Define a sane default for every platform
+** unless the build overrides it. localtime.c includes private.h before
+** tzfile.h, so this definition wins over the vendored fallback there.
+** At runtime it can still be overridden with MULLE_TZDIR or TZDIR.
+*/
+#ifndef TZDIR
 #define TZDIR  "/usr/share/zoneinfo"
 #endif
 
