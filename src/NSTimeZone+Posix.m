@@ -42,6 +42,8 @@
 // std-c and dependencies
 #import <MulleObjCStandardFoundation/_MulleGMTTimeZone-Private.h>
 
+#include <stdlib.h>
+
 
 
 @implementation NSTimeZone( Posix)
@@ -134,6 +136,7 @@
 
    s           = mulle_get_timezone_zone_tab_file();
    filename    = [NSString stringWithCString:s];
+   free( s);
    zonesString = [NSString stringWithContentsOfFile:filename];
 
    zonesLines  = [zonesString componentsSeparatedByString:@"\n"];

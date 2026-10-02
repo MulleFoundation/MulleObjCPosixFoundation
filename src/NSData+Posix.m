@@ -104,6 +104,15 @@ static struct mulle_data  slurp_data_of_pipe( int fd, struct mulle_allocator *al
 
    allocator = MulleObjCInstanceGetAllocator( self);
    filename  = [path fileSystemRepresentation];
+   if( ! filename)
+   {
+      // a nil path or a path that can't be converted to the filesystem
+      // representation must not be passed as NULL to open(2)
+      if( ! path)
+         errno = ENOENT;
+      [self release];
+      return( nil);
+   }
 
    // MEMO: remember that this has to be able to deal with pipes
    fd = open( filename, O_RDONLY);
