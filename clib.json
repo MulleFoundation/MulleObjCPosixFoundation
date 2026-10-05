@@ -6,6 +6,7 @@
    "license" : "BSD-3-Clause",
    "repo" : "MulleFoundation/MulleObjCPosixFoundation",
    "src" : [
+      "asset/dox/api/toc/index.md",
       "src/Functions/mulle-posix-tm.c",
       "src/Functions/mulle-posix-tm.h",
       "src/Functions/NSLog.h",
