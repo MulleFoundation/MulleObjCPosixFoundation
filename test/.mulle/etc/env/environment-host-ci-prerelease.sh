@@ -365,9 +365,9 @@ export MULLE_OBJC__STARTUP_NODETYPE="git"
 
 
 #
-# MulleObjC-startup url: ${MULLE_OBJC__STARTUP_URL:-https://github.com/MulleFoundation/MulleObjC-startup/archive/${MULLE_TAG}.tar.gz}
+# MulleObjC-startup url: ${MULLE_OBJC__STARTUP_URL:-https://github.com/mulle-objc/MulleObjC-startup/archive/${MULLE_TAG}.tar.gz}
 #
-export MULLE_OBJC__STARTUP_URL="https://github.com/MulleFoundation/MulleObjC-startup.git"
+export MULLE_OBJC__STARTUP_URL="https://github.com/mulle-objc/MulleObjC-startup.git"
 
 
 #
